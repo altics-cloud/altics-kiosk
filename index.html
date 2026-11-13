@@ -9,16 +9,48 @@
   <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; background-color: #020617; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; }
+    @media print {
+      body * { visibility: hidden; }
+      #printable-badge, #printable-badge * { visibility: visible; }
+      #printable-badge {
+        position: fixed;
+        left: 50%;
+        top: 40px;
+        transform: translateX(-50%);
+        border: 2px solid #0f172a;
+        box-shadow: none !important;
+      }
+      .no-print { display: none !important; }
+    }
   </style>
 </head>
 <body>
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useMemo } = React;
+
+    // Reusable Real QR Code Component (encodes employee ID like "EMP-101")
+    function EmployeeQRCode({ value, size = 140 }) {
+      const svgMarkup = useMemo(() => {
+        if (typeof window === 'undefined' || !window.qrcode) return '';
+        const qr = window.qrcode(0, 'M');
+        qr.addData(value);
+        qr.make();
+        return qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+      }, [value]);
+
+      return (
+        <div
+          style={{ width: size, height: size, display: 'inline-block', lineHeight: 0 }}
+          dangerouslySetInnerHTML={{ __html: svgMarkup }}
+        />
+      );
+    }
 
     function AlticsKiosk() {
       const [activeTab, setActiveTab] = useState('kiosk');
@@ -151,7 +183,8 @@
       const handleAddEmployee = (e) => {
         e.preventDefault();
         if (!newEmpName) return;
-        const newId = 'EMP-10' + (employees.length + 1);
+        const nextNum = 101 + employees.length;
+        const newId = 'EMP-' + nextNum;
         setEmployees([...employees, {
           id: newId,
           name: newEmpName,
@@ -290,10 +323,10 @@
 
             {activeTab === 'employees' && (
               <div>
-                <div style={{ ...s.card, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff Badges & Biometrics</h2>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Cached locally on the Altics terminal.</p>
+                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges & Biometrics</h2>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Each staff member gets a unique scannable QR code encoded with their ID.</p>
                   </div>
                   <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
                 </div>
@@ -301,26 +334,21 @@
                 <div style={s.grid}>
                   {employees.map(emp => (
                     <div key={emp.id} style={s.card}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
                         <div>
                           <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#818cf8', backgroundColor: 'rgba(99,102,241,0.15)', padding: '2px 8px', borderRadius: '6px' }}>{emp.id}</span>
                           <h3 style={{ margin: '8px 0 4px 0', fontSize: '16px' }}>{emp.name}</h3>
                           <p style={{ margin: 0, fontSize: '12px', color: '#94a3b8' }}>{emp.role} • {emp.department}</p>
                         </div>
-                        <div style={{ backgroundColor: '#fff', padding: '6px', borderRadius: '8px' }}>
-                          <svg width="40" height="40" viewBox="0 0 24 24" fill="#0f172a">
-                            <rect x="2" y="2" width="8" height="8" />
-                            <rect x="14" y="2" width="8" height="8" />
-                            <rect x="2" y="14" width="8" height="8" />
-                            <rect x="14" y="14" width="4" height="4" />
-                          </svg>
+                        <div style={{ backgroundColor: '#ffffff', padding: '6px', borderRadius: '8px', flexShrink: 0 }}>
+                          <EmployeeQRCode value={emp.id} size={56} />
                         </div>
                       </div>
                       <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <span style={{ fontSize: '12px', color: emp.hasFaceRegistered ? '#34d399' : '#fbbf24', fontWeight: 600 }}>
                           {emp.hasFaceRegistered ? '✓ Face Enrolled' : '⚠ Face Pending'}
                         </span>
-                        <button style={s.testBtn} onClick={() => setSelectedBadge(emp)}>Print Badge</button>
+                        <button style={s.primaryBtn} onClick={() => setSelectedBadge(emp)}>View / Print QR Badge</button>
                       </div>
                     </div>
                   ))}
@@ -376,7 +404,7 @@
                   <input style={s.input} type="text" value={newEmpRole} onChange={e => setNewEmpRole(e.target.value)} placeholder="e.g. Coordinator" />
                   <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
                     <button type="button" style={s.testBtn} onClick={() => setShowAddModal(false)}>Cancel</button>
-                    <button type="submit" style={s.primaryBtn}>Save & Enroll</button>
+                    <button type="submit" style={s.primaryBtn}>Save & Generate QR</button>
                   </div>
                 </form>
               </div>
@@ -385,22 +413,18 @@
 
           {selectedBadge && (
             <div style={s.modalOverlay}>
-              <div style={{ backgroundColor: '#ffffff', color: '#0f172a', borderRadius: '24px', padding: '28px', width: '100%', maxWidth: '320px', textAlign: 'center' }}>
-                <div style={{ fontSize: '11px', fontWeight: 800, color: '#4f46e5', letterSpacing: '1px' }}>ALTICS BIOMETRIC ID</div>
-                <div style={{ margin: '20px auto', padding: '16px', backgroundColor: '#f1f5f9', borderRadius: '16px', display: 'inline-block' }}>
-                  <svg width="120" height="120" viewBox="0 0 24 24" fill="#0f172a">
-                    <rect x="2" y="2" width="8" height="8" />
-                    <rect x="14" y="2" width="8" height="8" />
-                    <rect x="2" y="14" width="8" height="8" />
-                    <rect x="14" y="14" width="4" height="4" />
-                  </svg>
+              <div id="printable-badge" style={{ backgroundColor: '#ffffff', color: '#0f172a', borderRadius: '24px', padding: '28px', width: '100%', maxWidth: '320px', textAlign: 'center', boxShadow: '0 20px 40px rgba(0,0,0,0.4)' }}>
+                <div style={{ fontSize: '11px', fontWeight: 800, color: '#4f46e5', letterSpacing: '1.5px' }}>ALTICS BIOMETRIC ID</div>
+                <div style={{ margin: '18px auto', padding: '12px', backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', display: 'inline-block' }}>
+                  <EmployeeQRCode value={selectedBadge.id} size={160} />
                 </div>
+                <div style={{ fontFamily: 'monospace', fontSize: '13px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>{selectedBadge.id}</div>
                 <h3 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>{selectedBadge.name}</h3>
                 <p style={{ margin: '0 0 4px 0', fontSize: '13px', fontWeight: 600, color: '#4f46e5' }}>{selectedBadge.role}</p>
-                <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>{selectedBadge.department} • {selectedBadge.id}</p>
-                <div style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
+                <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>{selectedBadge.department}</p>
+                <div className="no-print" style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
                   <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#e2e8f0', fontWeight: 600, cursor: 'pointer' }} onClick={() => setSelectedBadge(null)}>Close</button>
-                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#4f46e5', color: '#fff', fontWeight: 600, cursor: 'pointer' }} onClick={() => window.print()}>Print</button>
+                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#4f46e5', color: '#fff', fontWeight: 600, cursor: 'pointer' }} onClick={() => window.print()}>Print Badge</button>
                 </div>
               </div>
             </div>
