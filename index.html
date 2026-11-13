@@ -11,6 +11,7 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
   <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/dist/face-api.js"></script>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; background-color: #020617; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; }
@@ -43,6 +44,9 @@
     const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
     // =========================================================================
 
+    const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
+    const FACE_MATCH_THRESHOLD = 0.52;
+
     function EmployeeQRCode({ value, size = 140 }) {
       const svgMarkup = useMemo(() => {
         if (typeof window === 'undefined' || !window.qrcode) return '';
@@ -68,6 +72,14 @@
       const [isOnline, setIsOnline] = useState(navigator.onLine);
       const [cameraActive, setCameraActive] = useState(false);
       const [isSyncing, setIsSyncing] = useState(false);
+      const [modelsLoaded, setModelsLoaded] = useState(false);
+
+      // Face Enrollment Modal State
+      const [enrollingEmp, setEnrollingEmp] = useState(null);
+      const [enrollMsg, setEnrollMsg] = useState('');
+      const [capturingFace, setCapturingFace] = useState(false);
+      const enrollVideoRef = useRef(null);
+      const enrollStreamRef = useRef(null);
 
       const scannerRef = useRef(null);
       const lastScannedRef = useRef({ id: '', time: 0 });
@@ -78,13 +90,16 @@
         const saved = localStorage.getItem('altics_employees');
         if (saved) { try { return JSON.parse(saved); } catch (e) {} }
         return [
-          { id: 'EMP-101', name: 'Aarav Sharma', department: 'Development', role: 'Software Engineer', hasFaceRegistered: true },
-          { id: 'EMP-102', name: 'Priya Deshmukh', department: 'Design', role: 'UI/UX Lead', hasFaceRegistered: true },
-          { id: 'EMP-103', name: 'Rohan Kulkarni', department: 'Marketing', role: 'Growth Specialist', hasFaceRegistered: true },
-          { id: 'EMP-104', name: 'Ananya Patil', department: 'Operations', role: 'Project Manager', hasFaceRegistered: true },
-          { id: 'EMP-105', name: 'Vikram Joshi', department: 'Development', role: 'Backend Engineer', hasFaceRegistered: true }
+          { id: 'EMP-101', name: 'Aarav Sharma', department: 'Development', role: 'Software Engineer', faceDescriptor: null },
+          { id: 'EMP-102', name: 'Priya Deshmukh', department: 'Design', role: 'UI/UX Lead', faceDescriptor: null },
+          { id: 'EMP-103', name: 'Rohan Kulkarni', department: 'Marketing', role: 'Growth Specialist', faceDescriptor: null },
+          { id: 'EMP-104', name: 'Ananya Patil', department: 'Operations', role: 'Project Manager', faceDescriptor: null },
+          { id: 'EMP-105', name: 'Vikram Joshi', department: 'Development', role: 'Backend Engineer', faceDescriptor: null }
         ];
       });
+
+      const employeesRef = useRef(employees);
+      employeesRef.current = employees;
 
       const [attendanceLogs, setAttendanceLogs] = useState(() => {
         const saved = localStorage.getItem('altics_attendance_logs');
@@ -100,7 +115,23 @@
 
       const isSheetConfigured = GOOGLE_SHEET_URL && GOOGLE_SHEET_URL.startsWith('https://script.google.com/');
 
-      // Send a single log entry to Google Sheets
+      useEffect(() => {
+        const loadFaceModels = async () => {
+          try {
+            if (!window.faceapi) return;
+            await Promise.all([
+              window.faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODEL_URL),
+              window.faceapi.nets.faceLandmark68Net.loadFromUri(FACE_MODEL_URL),
+              window.faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODEL_URL)
+            ]);
+            setModelsLoaded(true);
+          } catch (err) {
+            console.error('Face model load error:', err);
+          }
+        };
+        loadFaceModels();
+      }, []);
+
       const sendLogToGoogleSheet = async (logEntry) => {
         if (!isSheetConfigured || !navigator.onLine) return false;
         try {
@@ -116,7 +147,6 @@
         }
       };
 
-      // Flush all unsynced offline records when internet is available
       const syncPendingLogs = async (currentLogs) => {
         if (!isSheetConfigured || !navigator.onLine) return;
         const unsynced = currentLogs.filter(l => !l.synced);
@@ -159,9 +189,8 @@
         localStorage.setItem('altics_attendance_logs', JSON.stringify(attendanceLogs));
       }, [attendanceLogs]);
 
-      // Start / Stop Live Android Camera QR Scanner
       useEffect(() => {
-        if (!cameraActive || activeTab !== 'kiosk') {
+        if (!cameraActive || activeTab !== 'kiosk' || enrollingEmp) {
           if (scannerRef.current) {
             scannerRef.current.stop().then(() => scannerRef.current.clear()).catch(() => {});
             scannerRef.current = null;
@@ -177,11 +206,11 @@
           { fps: 10, qrbox: { width: 200, height: 200 } },
           (decodedText) => {
             const now = Date.now();
-            if (decodedText === lastScannedRef.current.id && now - lastScannedRef.current.time < 4000) {
+            if (decodedText === lastScannedRef.current.id && now - lastScannedRef.current.time < 4500) {
               return;
             }
             lastScannedRef.current = { id: decodedText, time: now };
-            processScanWithBiometrics(decodedText, scanModeRef.current);
+            processScanWithBiometrics(decodedText, scanModeRef.current, true);
           },
           () => {}
         ).catch(() => {
@@ -195,7 +224,71 @@
             scannerRef.current = null;
           }
         };
-      }, [cameraActive, activeTab]);
+      }, [cameraActive, activeTab, enrollingEmp]);
+
+      useEffect(() => {
+        if (!enrollingEmp) {
+          if (enrollStreamRef.current) {
+            enrollStreamRef.current.getTracks().forEach(t => t.stop());
+            enrollStreamRef.current = null;
+          }
+          return;
+        }
+
+        setEnrollMsg('Position face clearly in the frame and tap Capture Face.');
+        navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+          .then(stream => {
+            enrollStreamRef.current = stream;
+            if (enrollVideoRef.current) {
+              enrollVideoRef.current.srcObject = stream;
+            }
+          })
+          .catch(() => {
+            setEnrollMsg('Camera blocked. Please allow camera permission in Chrome settings.');
+          });
+
+        return () => {
+          if (enrollStreamRef.current) {
+            enrollStreamRef.current.getTracks().forEach(t => t.stop());
+            enrollStreamRef.current = null;
+          }
+        };
+      }, [enrollingEmp]);
+
+      const captureAndSaveFace = async () => {
+        if (!modelsLoaded || !enrollVideoRef.current) {
+          setEnrollMsg('Face AI models still loading, wait 2 seconds and try again.');
+          return;
+        }
+        setCapturingFace(true);
+        setEnrollMsg('Analyzing facial landmarks...');
+
+        try {
+          const detection = await window.faceapi
+            .detectSingleFace(enrollVideoRef.current, new window.faceapi.TinyFaceDetectorOptions())
+            .withFaceLandmarks()
+            .withFaceDescriptor();
+
+          if (!detection) {
+            setCapturingFace(false);
+            setEnrollMsg('No face detected! Ensure good lighting and look straight at the camera.');
+            return;
+          }
+
+          const descriptorArray = Array.from(detection.descriptor);
+          setEmployees(prev =>
+            prev.map(emp => (emp.id === enrollingEmp.id ? { ...emp, faceDescriptor: descriptorArray } : emp))
+          );
+
+          playBeep(true);
+          setCapturingFace(false);
+          setEnrollingEmp(null);
+          setScanStatus({ type: 'success', message: `✓ Face biometric registered for ${enrollingEmp.name} (${enrollingEmp.id})!` });
+        } catch (err) {
+          setCapturingFace(false);
+          setEnrollMsg('Error reading face. Please try again.');
+        }
+      };
 
       const playBeep = (success = true) => {
         try {
@@ -209,14 +302,23 @@
           osc.connect(gain);
           gain.connect(audioCtx.destination);
           osc.start();
-          osc.stop(audioCtx.currentTime + (success ? 0.15 : 0.4));
+          osc.stop(audioCtx.currentTime + (success ? 0.15 : 0.45));
         } catch (e) {}
       };
 
-      const processScanWithBiometrics = async (scannedId, overrideMode = null) => {
+      const euclideanDistance = (arr1, arr2) => {
+        let sum = 0;
+        for (let i = 0; i < arr1.length; i++) {
+          const diff = arr1[i] - arr2[i];
+          sum += diff * diff;
+        }
+        return Math.sqrt(sum);
+      };
+
+      const processScanWithBiometrics = async (scannedId, overrideMode = null, fromLiveCamera = false) => {
         const activeMode = overrideMode || scanMode;
         const cleanId = scannedId.trim();
-        const employee = employees.find(e => e.id === cleanId || e.name.toLowerCase() === cleanId.toLowerCase());
+        const employee = employeesRef.current.find(e => e.id === cleanId || e.name.toLowerCase() === cleanId.toLowerCase());
 
         if (!employee) {
           playBeep(false);
@@ -225,63 +327,108 @@
         }
 
         setVerifyingFace(true);
-        setScanStatus({ type: 'info', message: `QR Verified for ${employee.name}... Logging ${activeMode.replace('_', ' ')}.` });
+        let biometricNote = 'QR Verified';
 
-        setTimeout(async () => {
-          setVerifyingFace(false);
+        if (fromLiveCamera && employee.faceDescriptor && modelsLoaded) {
+          setScanStatus({ type: 'info', message: `QR matched ${employee.name}. Verifying live face...` });
+          const videoEl = document.querySelector('#qr-reader video');
 
-          const now = new Date();
-          const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          if (videoEl) {
+            const detection = await window.faceapi
+              .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions())
+              .withFaceLandmarks()
+              .withFaceDescriptor();
 
-          const newLog = {
-            id: 'LOG-' + Date.now(),
-            empId: employee.id,
-            name: employee.name,
-            type: activeMode,
-            time: timeStr,
-            note: activeMode === 'FIELD_DUTY' ? 'Field Visit / Off-Site' : '',
-            synced: false
-          };
+            if (!detection) {
+              setVerifyingFace(false);
+              playBeep(false);
+              setScanStatus({ type: 'error', message: `Face Not Visible: Hold QR badge slightly lower so your face is in the camera frame.` });
+              return;
+            }
 
-          const uploaded = await sendLogToGoogleSheet(newLog);
-          newLog.synced = uploaded;
+            const distance = euclideanDistance(Array.from(detection.descriptor), employee.faceDescriptor);
+            if (distance > FACE_MATCH_THRESHOLD) {
+              setVerifyingFace(false);
+              playBeep(false);
+              setScanStatus({ type: 'error', message: `Biometric Mismatch! Face does not match ${employee.name} (${employee.id}).` });
+              return;
+            }
+            biometricNote = 'QR + Face Verified';
+          }
+        } else if (fromLiveCamera && !employee.faceDescriptor) {
+          biometricNote = 'QR Only (Face Not Enrolled)';
+        } else {
+          biometricNote = activeMode === 'FIELD_DUTY' ? 'Field Visit / Off-Site' : 'Manual Tap';
+        }
 
-          setAttendanceLogs(prev => [newLog, ...prev]);
-          playBeep(true);
+        setVerifyingFace(false);
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-          const modeLabels = {
-            CHECK_IN: 'Checked In Successfully',
-            LUNCH_OUT: 'Lunch Out Recorded',
-            LUNCH_IN: 'Returned from Lunch',
-            CHECK_OUT: 'Checked Out for the Day',
-            FIELD_DUTY: 'Marked On Field Duty'
-          };
+        const newLog = {
+          id: 'LOG-' + Date.now(),
+          empId: employee.id,
+          name: employee.name,
+          type: activeMode,
+          time: timeStr,
+          note: biometricNote,
+          synced: false
+        };
 
-          const syncNote = uploaded
-            ? '✓ Saved to Google Sheet'
-            : isSheetConfigured
-              ? '⏳ Queued Offline (Auto-syncs on Wi-Fi)'
-              : '⚠ Saved Locally (Paste Sheet URL in code)';
+        const uploaded = await sendLogToGoogleSheet(newLog);
+        newLog.synced = uploaded;
 
-          setScanStatus({ type: 'success', message: `${employee.name} — ${modeLabels[activeMode]} (${syncNote})` });
-        }, 500);
+        setAttendanceLogs(prev => [newLog, ...prev]);
+        playBeep(true);
+
+        const modeLabels = {
+          CHECK_IN: 'Checked In',
+          LUNCH_OUT: 'Lunch Out',
+          LUNCH_IN: 'Post-Lunch In',
+          CHECK_OUT: 'Checked Out',
+          FIELD_DUTY: 'On Field Duty'
+        };
+
+        const syncNote = uploaded
+          ? '✓ Saved to Sheet'
+          : isSheetConfigured
+            ? '⏳ Queued Offline'
+            : '⚠ Local Only';
+
+        setScanStatus({
+          type: 'success',
+          message: `${employee.name} — ${modeLabels[activeMode]} [${biometricNote}] (${syncNote})`
+        });
       };
 
       const handleAddEmployee = (e) => {
         e.preventDefault();
         if (!newEmpName) return;
-        const nextNum = 101 + employees.length;
-        const newId = 'EMP-' + nextNum;
+        const maxNum = employees.reduce((max, emp) => {
+          const num = parseInt(emp.id.replace('EMP-', ''), 10);
+          return !isNaN(num) && num > max ? num : max;
+        }, 100);
+        const newId = 'EMP-' + (maxNum + 1);
         setEmployees([...employees, {
           id: newId,
           name: newEmpName,
           department: newEmpDept,
           role: newEmpRole || 'Staff Member',
-          hasFaceRegistered: true
+          faceDescriptor: null
         }]);
         setNewEmpName('');
         setNewEmpRole('');
         setShowAddModal(false);
+      };
+
+      const handleRemoveEmployee = (emp) => {
+        if (!window.confirm(`Remove ${emp.name} (${emp.id}) from the kiosk? Past logs in Google Sheets will remain intact.`)) {
+          return;
+        }
+        setEmployees(prev => prev.filter(item => item.id !== emp.id));
+        if (selectedBadge && selectedBadge.id === emp.id) {
+          setSelectedBadge(null);
+        }
       };
 
       const pendingSyncCount = attendanceLogs.filter(l => !l.synced).length;
@@ -300,13 +447,14 @@
         card: { backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: '16px', padding: '20px', marginBottom: '20px' },
         modeGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px', marginTop: '12px' },
         modeBtn: (active, color) => ({ padding: '14px', borderRadius: '12px', border: `1px solid ${active ? color : '#1e293b'}`, backgroundColor: active ? `${color}22` : '#020617', color: active ? color : '#94a3b8', fontWeight: 700, fontSize: '14px', cursor: 'pointer', textAlign: 'left' }),
-        scannerBox: { width: '250px', minHeight: '230px', margin: '20px auto', border: '2px dashed #6366f1', borderRadius: '24px', backgroundColor: '#020617', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '12px', overflow: 'hidden' },
+        scannerBox: { width: '260px', minHeight: '240px', margin: '20px auto', border: '2px dashed #6366f1', borderRadius: '24px', backgroundColor: '#020617', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', textAlign: 'center', padding: '12px', overflow: 'hidden' },
         alert: (type) => ({ padding: '14px 16px', borderRadius: '12px', fontSize: '14px', fontWeight: 600, marginTop: '16px', backgroundColor: type === 'success' ? 'rgba(16,185,129,0.15)' : type === 'error' ? 'rgba(244,63,94,0.15)' : 'rgba(59,130,246,0.15)', color: type === 'success' ? '#6ee7b7' : type === 'error' ? '#fda4af' : '#93c5fd', border: `1px solid ${type === 'success' ? '#10b981' : type === 'error' ? '#f43f5e' : '#3b82f6'}` }),
         testBtn: { backgroundColor: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', padding: '8px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' },
+        dangerBtn: { backgroundColor: 'rgba(244,63,94,0.15)', color: '#fda4af', border: '1px solid rgba(244,63,94,0.35)', padding: '8px 12px', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer' },
         logItem: { backgroundColor: '#020617', border: '1px solid #1e293b', padding: '12px 14px', borderRadius: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' },
         primaryBtn: { backgroundColor: '#4f46e5', color: '#ffffff', border: 'none', padding: '10px 16px', borderRadius: '10px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' },
         input: { width: '100%', backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '10px', padding: '10px 12px', color: '#ffffff', fontSize: '14px', marginTop: '6px', marginBottom: '14px' },
-        modalOverlay: { position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', zIndex: 50 }
+        modalOverlay: { position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', zIndex: 50 }
       };
 
       return (
@@ -322,7 +470,9 @@
               </div>
               <div>
                 <h1 style={s.title}>Altics Biometric Kiosk</h1>
-                <p style={s.subtitle}>Office Entrance Biometric Terminal</p>
+                <p style={s.subtitle}>
+                  {modelsLoaded ? '✓ Face AI Ready • QR + Biometric Terminal' : 'Loading Face AI Models...'}
+                </p>
               </div>
             </div>
 
@@ -341,7 +491,7 @@
 
             <nav style={s.nav}>
               <button style={s.navBtn(activeTab === 'kiosk')} onClick={() => setActiveTab('kiosk')}>Kiosk Terminal</button>
-              <button style={s.navBtn(activeTab === 'employees')} onClick={() => setActiveTab('employees')}>Badges ({employees.length})</button>
+              <button style={s.navBtn(activeTab === 'employees')} onClick={() => setActiveTab('employees')}>Badges & Faces ({employees.length})</button>
               <button style={s.navBtn(activeTab === 'reports')} onClick={() => setActiveTab('reports')}>Master Sheet</button>
             </nav>
           </header>
@@ -363,20 +513,18 @@
 
                   <div style={s.card}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                      <span style={{ fontSize: '12px', color: '#34d399', fontWeight: 600 }}>● Altics Terminal Active</span>
+                      <span style={{ fontSize: '12px', color: '#34d399', fontWeight: 600 }}>● QR + Face Scanner</span>
                       <button
                         style={{ ...s.primaryBtn, backgroundColor: cameraActive ? '#f43f5e' : '#10b981', padding: '6px 12px', fontSize: '12px' }}
                         onClick={() => setCameraActive(!cameraActive)}
                       >
-                        {cameraActive ? 'Stop Camera' : '📷 Start QR Camera'}
+                        {cameraActive ? 'Stop Camera' : '📷 Start Camera'}
                       </button>
                     </div>
 
                     <div style={s.scannerBox}>
                       {cameraActive ? (
                         <div id="qr-reader"></div>
-                      ) : verifyingFace ? (
-                        <div style={{ color: '#818cf8', fontWeight: 700, fontSize: '14px' }}>Logging to Sheet...</div>
                       ) : (
                         <>
                           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#818cf8" strokeWidth="2" style={{ marginBottom: '10px' }}>
@@ -385,8 +533,8 @@
                             <rect x="3" y="14" width="7" height="7" />
                             <rect x="14" y="14" width="7" height="7" />
                           </svg>
-                          <div style={{ fontSize: '14px', fontWeight: 600 }}>Tap "Start QR Camera" Above</div>
-                          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>Or tap a staff button below</div>
+                          <div style={{ fontSize: '14px', fontWeight: 600 }}>Tap "Start Camera" Above</div>
+                          <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>Hold QR badge below chin so both face & QR are visible</div>
                         </>
                       )}
                     </div>
@@ -399,7 +547,7 @@
                       </div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                         {employees.map(emp => (
-                          <button key={emp.id} style={s.testBtn} onClick={() => processScanWithBiometrics(emp.id)}>
+                          <button key={emp.id} style={s.testBtn} onClick={() => processScanWithBiometrics(emp.id, null, false)}>
                             {emp.name}
                           </button>
                         ))}
@@ -422,7 +570,7 @@
                         <div style={{ fontWeight: 600, fontSize: '14px' }}>{log.name}</div>
                         <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>
                           <span style={{ backgroundColor: '#1e293b', padding: '2px 6px', borderRadius: '4px', marginRight: '8px' }}>{log.type.replace('_', ' ')}</span>
-                          {log.time}
+                          {log.time} • <span style={{ color: '#818cf8' }}>{log.note}</span>
                         </div>
                       </div>
                       <span style={{ fontSize: '11px', fontWeight: 600, color: log.synced ? '#34d399' : '#fbbf24' }}>
@@ -438,8 +586,8 @@
               <div>
                 <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges & Field Override</h2>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Print scannable QR ID cards or mark staff on Field Duty directly.</p>
+                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges & Face Registration</h2>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Enroll each employee's face once, print their QR badge, or remove former staff.</p>
                   </div>
                   <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
                 </div>
@@ -449,7 +597,12 @@
                     <div key={emp.id} style={s.card}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
                         <div>
-                          <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#818cf8', backgroundColor: 'rgba(99,102,241,0.15)', padding: '2px 8px', borderRadius: '6px' }}>{emp.id}</span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#818cf8', backgroundColor: 'rgba(99,102,241,0.15)', padding: '2px 8px', borderRadius: '6px' }}>{emp.id}</span>
+                            <span style={{ fontSize: '11px', fontWeight: 600, color: emp.faceDescriptor ? '#34d399' : '#fbbf24' }}>
+                              {emp.faceDescriptor ? '✓ Face Registered' : '⚠ No Face Yet'}
+                            </span>
+                          </div>
                           <h3 style={{ margin: '8px 0 4px 0', fontSize: '16px' }}>{emp.name}</h3>
                           <p style={{ margin: 0, fontSize: '12px', color: '#94a3b8' }}>{emp.role} • {emp.department}</p>
                         </div>
@@ -457,11 +610,18 @@
                           <EmployeeQRCode value={emp.id} size={56} />
                         </div>
                       </div>
-                      <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-                        <button style={s.testBtn} onClick={() => { processScanWithBiometrics(emp.id, 'FIELD_DUTY'); setActiveTab('kiosk'); }}>
-                          🚗 Mark Field Duty
+                      <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #1e293b', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                        <button
+                          style={{ ...s.testBtn, backgroundColor: emp.faceDescriptor ? '#1e293b' : '#065f46', color: '#fff' }}
+                          onClick={() => setEnrollingEmp(emp)}
+                        >
+                          {emp.faceDescriptor ? '🔄 Re-Capture Face' : '📸 Register Face'}
                         </button>
-                        <button style={s.primaryBtn} onClick={() => setSelectedBadge(emp)}>Print QR Badge</button>
+                        <button style={s.testBtn} onClick={() => { processScanWithBiometrics(emp.id, 'FIELD_DUTY', false); setActiveTab('kiosk'); }}>
+                          🚗 Field Duty
+                        </button>
+                        <button style={s.primaryBtn} onClick={() => setSelectedBadge(emp)}>Print Badge</button>
+                        <button style={s.dangerBtn} onClick={() => handleRemoveEmployee(emp)}>🗑️ Remove</button>
                       </div>
                     </div>
                   ))}
@@ -479,8 +639,9 @@
                       <tr style={{ borderBottom: '1px solid #1e293b', color: '#94a3b8' }}>
                         <th style={{ padding: '12px' }}>Employee</th>
                         <th style={{ padding: '12px' }}>Action</th>
+                        <th style={{ padding: '12px' }}>Verification</th>
                         <th style={{ padding: '12px' }}>Time</th>
-                        <th style={{ padding: '12px' }}>Google Sheet Status</th>
+                        <th style={{ padding: '12px' }}>Google Sheet</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -488,8 +649,9 @@
                         <tr key={log.id} style={{ borderBottom: '1px solid #1e293b' }}>
                           <td style={{ padding: '12px', fontWeight: 600 }}>{log.name} ({log.empId})</td>
                           <td style={{ padding: '12px' }}>{log.type.replace('_', ' ')}</td>
+                          <td style={{ padding: '12px', color: '#818cf8' }}>{log.note}</td>
                           <td style={{ padding: '12px' }}>{log.time}</td>
-                          <td style={{ padding: '12px', color: log.synced ? '#34d399' : '#fbbf24' }}>{log.synced ? '✓ Synced to Sheet' : 'Queued Offline'}</td>
+                          <td style={{ padding: '12px', color: log.synced ? '#34d399' : '#fbbf24' }}>{log.synced ? '✓ Synced' : 'Queued'}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -499,6 +661,26 @@
             )}
           </main>
 
+          {/* FACE ENROLLMENT MODAL */}
+          {enrollingEmp && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '380px', textAlign: 'center' }}>
+                <h3 style={{ marginTop: 0 }}>Register Face: {enrollingEmp.name}</h3>
+                <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '14px' }}>{enrollMsg}</p>
+                <div style={{ width: '240px', height: '240px', margin: '0 auto 16px auto', borderRadius: '20px', overflow: 'hidden', border: '2px solid #4f46e5', backgroundColor: '#020617' }}>
+                  <video ref={enrollVideoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+                </div>
+                <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+                  <button type="button" style={s.testBtn} onClick={() => setEnrollingEmp(null)}>Cancel</button>
+                  <button type="button" style={s.primaryBtn} disabled={capturingFace} onClick={captureAndSaveFace}>
+                    {capturingFace ? 'Scanning...' : '📸 Capture & Save Face'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ADD STAFF MODAL */}
           {showAddModal && (
             <div style={s.modalOverlay}>
               <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
@@ -524,6 +706,7 @@
             </div>
           )}
 
+          {/* PRINT BADGE MODAL */}
           {selectedBadge && (
             <div style={s.modalOverlay}>
               <div id="printable-badge" style={{ backgroundColor: '#ffffff', color: '#0f172a', borderRadius: '24px', padding: '28px', width: '100%', maxWidth: '320px', textAlign: 'center', boxShadow: '0 20px 40px rgba(0,0,0,0.4)' }}>
