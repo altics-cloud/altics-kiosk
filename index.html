@@ -45,7 +45,7 @@
     // =========================================================================
 
     const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
-    const FACE_MATCH_THRESHOLD = 0.58; // Optimized for mobile front cameras & office lighting
+    const FACE_MATCH_THRESHOLD = 0.58;
 
     function EmployeeQRCode({ value, size = 140 }) {
       const svgMarkup = useMemo(() => {
@@ -67,7 +67,7 @@
     function AlticsKiosk() {
       const [activeTab, setActiveTab] = useState('kiosk');
       const [scanMode, setScanMode] = useState('CHECK_IN');
-      const [authPolicy, setAuthPolicy] = useState('FACE_ONLY'); // Defaults to hands-free Face Only
+      const [authPolicy, setAuthPolicy] = useState('FACE_ONLY');
       const [scanStatus, setScanStatus] = useState(null);
       const [liveAiHint, setLiveAiHint] = useState('');
       const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -203,7 +203,7 @@
         return Math.sqrt(sum);
       };
 
-      // Live Camera Scanner (auto-recognizes faces in FACE_ONLY mode with zero manual tap)
+      // Live Camera Scanner
       useEffect(() => {
         if (!cameraActive || activeTab !== 'kiosk' || enrollingEmp) {
           setLiveAiHint('');
@@ -289,9 +289,7 @@
               } else {
                 setLiveAiHint('Face detected — not recognized (move closer or register face)');
               }
-            } catch (e) {
-              // ignore transient frame read errors
-            }
+            } catch (e) {}
             isProcessingFaceRef.current = false;
           }, 900);
         }).catch(() => {
@@ -595,10 +593,13 @@
                   <div style={s.card}>
                     <div style={{ fontSize: '12px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>1. Select Attendance Action</div>
                     <div style={s.modeGrid}>
+                      {/* Row 1: Check-In & Check-Out */}
                       <button style={s.modeBtn(scanMode === 'CHECK_IN', '#10b981')} onClick={() => setScanMode('CHECK_IN')}>✓ Check-In</button>
+                      <button style={s.modeBtn(scanMode === 'CHECK_OUT', '#f43f5e')} onClick={() => setScanMode('CHECK_OUT')}>↪ Check-Out</button>
+                      {/* Row 2: Lunch Out & Post-Lunch */}
                       <button style={s.modeBtn(scanMode === 'LUNCH_OUT', '#f59e0b')} onClick={() => setScanMode('LUNCH_OUT')}>☕ Lunch Out</button>
                       <button style={s.modeBtn(scanMode === 'LUNCH_IN', '#3b82f6')} onClick={() => setScanMode('LUNCH_IN')}>⏱ Post-Lunch</button>
-                      <button style={s.modeBtn(scanMode === 'CHECK_OUT', '#f43f5e')} onClick={() => setScanMode('CHECK_OUT')}>↪ Check-Out</button>
+                      {/* Row 3: Field Duty */}
                       <button style={{ ...s.modeBtn(scanMode === 'FIELD_DUTY', '#a855f7'), gridColumn: 'span 2' }} onClick={() => setScanMode('FIELD_DUTY')}>🚗 Field Duty / Off-Site Visit</button>
                     </div>
 
