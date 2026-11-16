@@ -68,6 +68,7 @@
       const [activeTab, setActiveTab] = useState('kiosk');
       const [scanMode, setScanMode] = useState('CHECK_IN');
       const [authPolicy, setAuthPolicy] = useState('FACE_ONLY');
+      const [voiceEnabled, setVoiceEnabled] = useState(true);
       const [scanStatus, setScanStatus] = useState(null);
       const [liveAiHint, setLiveAiHint] = useState('');
       const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -90,6 +91,8 @@
       scanModeRef.current = scanMode;
       const authPolicyRef = useRef(authPolicy);
       authPolicyRef.current = authPolicy;
+      const voiceEnabledRef = useRef(voiceEnabled);
+      voiceEnabledRef.current = voiceEnabled;
 
       const [employees, setEmployees] = useState(() => {
         const saved = localStorage.getItem('altics_employees');
@@ -201,6 +204,48 @@
           sum += diff * diff;
         }
         return Math.sqrt(sum);
+      };
+
+      const unlockSpeechEngine = () => {
+        try {
+          if ('speechSynthesis' in window) {
+            const silent = new SpeechSynthesisUtterance('');
+            silent.volume = 0;
+            window.speechSynthesis.speak(silent);
+          }
+        } catch (e) {}
+      };
+
+      const playBeepAndSpeak = (success = true, spokenPhrase = '') => {
+        try {
+          const AudioCtx = window.AudioContext || window.webkitAudioContext;
+          const audioCtx = new AudioCtx();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = success ? 'sine' : 'sawtooth';
+          osc.frequency.setValueAtTime(success ? 880 : 220, audioCtx.currentTime);
+          if (success) {
+            osc.frequency.setValueAtTime(1174.66, audioCtx.currentTime + 0.08);
+          }
+          gain.gain.setValueAtTime(0.18, audioCtx.currentTime);
+          osc.connect(gain);
+          gain.connect(audioCtx.destination);
+          osc.start();
+          osc.stop(audioCtx.currentTime + (success ? 0.22 : 0.45));
+        } catch (e) {}
+
+        if (spokenPhrase && voiceEnabledRef.current && 'speechSynthesis' in window) {
+          try {
+            window.speechSynthesis.cancel();
+            setTimeout(() => {
+              const utterance = new SpeechSynthesisUtterance(spokenPhrase);
+              utterance.rate = 1.02;
+              utterance.pitch = 1.0;
+              utterance.volume = 1.0;
+              window.speechSynthesis.speak(utterance);
+            }, 180);
+          } catch (e) {}
+        }
       };
 
       // Live Camera Scanner
@@ -339,6 +384,7 @@
       }, [enrollingEmp]);
 
       const captureAndSaveFace = async () => {
+        unlockSpeechEngine();
         if (!modelsLoaded || !enrollVideoRef.current) {
           setEnrollMsg('Face AI models still loading, wait 2 seconds and try again.');
           return;
@@ -363,7 +409,7 @@
             prev.map(emp => (emp.id === enrollingEmp.id ? { ...emp, faceDescriptor: descriptorArray } : emp))
           );
 
-          playBeep(true);
+          playBeepAndSpeak(true, `Face registered for ${enrollingEmp.name}`);
           setCapturingFace(false);
           setEnrollingEmp(null);
           setScanStatus({ type: 'success', message: `✓ Face biometric registered for ${enrollingEmp.name} (${enrollingEmp.id})!` });
@@ -371,22 +417,6 @@
           setCapturingFace(false);
           setEnrollMsg('Error reading face. Please try again.');
         }
-      };
-
-      const playBeep = (success = true) => {
-        try {
-          const AudioCtx = window.AudioContext || window.webkitAudioContext;
-          const audioCtx = new AudioCtx();
-          const osc = audioCtx.createOscillator();
-          const gain = audioCtx.createGain();
-          osc.type = success ? 'sine' : 'sawtooth';
-          osc.frequency.setValueAtTime(success ? 880 : 220, audioCtx.currentTime);
-          gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
-          osc.connect(gain);
-          gain.connect(audioCtx.destination);
-          osc.start();
-          osc.stop(audioCtx.currentTime + (success ? 0.15 : 0.45));
-        } catch (e) {}
       };
 
       const recordVerifiedLog = async (employee, activeMode, biometricNote) => {
@@ -403,19 +433,28 @@
           synced: false
         };
 
+        const modeLabels = {
+          CHECK_IN: 'Checked In',
+          LUNCH_OUT: 'Lunch Out',
+          LUNCH_IN: 'Post Lunch In',
+          CHECK_OUT: 'Checked Out',
+          FIELD_DUTY: 'On Field Duty'
+        };
+
+        const spokenMessages = {
+          CHECK_IN: `Welcome, ${employee.name}, Checked In`,
+          CHECK_OUT: `Thank you, ${employee.name}, Checked Out`,
+          LUNCH_OUT: `${employee.name}, Lunch Out`,
+          LUNCH_IN: `Welcome back, ${employee.name}, Post Lunch In`,
+          FIELD_DUTY: `${employee.name}, Field Duty logged`
+        };
+
+        playBeepAndSpeak(true, spokenMessages[activeMode]);
+
         const uploaded = await sendLogToGoogleSheet(newLog);
         newLog.synced = uploaded;
 
         setAttendanceLogs(prev => [newLog, ...prev]);
-        playBeep(true);
-
-        const modeLabels = {
-          CHECK_IN: 'Checked In',
-          LUNCH_OUT: 'Lunch Out',
-          LUNCH_IN: 'Post-Lunch In',
-          CHECK_OUT: 'Checked Out',
-          FIELD_DUTY: 'On Field Duty'
-        };
 
         const syncNote = uploaded
           ? '✓ Saved to Sheet'
@@ -430,13 +469,14 @@
       };
 
       const processScanWithBiometrics = async (scannedId, overrideMode = null, fromLiveCamera = false) => {
+        unlockSpeechEngine();
         const activeMode = overrideMode || scanMode;
         const policy = authPolicyRef.current;
         const cleanId = scannedId.trim();
         const employee = employeesRef.current.find(e => e.id === cleanId || e.name.toLowerCase() === cleanId.toLowerCase());
 
         if (!employee) {
-          playBeep(false);
+          playBeepAndSpeak(false, 'Unknown badge');
           setScanStatus({ type: 'error', message: `Unknown Badge ID: "${cleanId}". Access Denied.` });
           return;
         }
@@ -464,14 +504,14 @@
               .withFaceDescriptor();
 
             if (!detection) {
-              playBeep(false);
+              playBeepAndSpeak(false, 'Face not visible');
               setScanStatus({ type: 'error', message: `Face Not Visible: Hold QR badge slightly lower so your face is in frame.` });
               return;
             }
 
             const distance = euclideanDistance(Array.from(detection.descriptor), employee.faceDescriptor);
             if (distance > FACE_MATCH_THRESHOLD) {
-              playBeep(false);
+              playBeepAndSpeak(false, 'Face mismatch');
               setScanStatus({ type: 'error', message: `Biometric Mismatch! Face does not match ${employee.name} (${employee.id}).` });
               return;
             }
@@ -542,7 +582,7 @@
       };
 
       const policyHint = {
-        FACE_ONLY: 'Look directly at the front camera — auto-logs with your name & time',
+        FACE_ONLY: 'Look directly at the front camera — auto-logs with your name & voice chime',
         QR_ONLY: 'Hold QR badge up to camera for instant badge check-in',
         BOTH: 'Hold QR badge below chin so both face & QR are visible'
       };
@@ -561,12 +601,18 @@
               <div>
                 <h1 style={s.title}>Altics Biometric Kiosk</h1>
                 <p style={s.subtitle}>
-                  {modelsLoaded ? '✓ Face AI Ready • Hands-Free Auto Check-In' : 'Loading Face AI Models...'}
+                  {modelsLoaded ? '✓ Face AI Ready • Voice + Chime Confirmation' : 'Loading Face AI Models...'}
                 </p>
               </div>
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <button
+                style={{ ...s.testBtn, backgroundColor: voiceEnabled ? 'rgba(99,102,241,0.2)' : '#1e293b', color: voiceEnabled ? '#a5b4fc' : '#94a3b8' }}
+                onClick={() => { unlockSpeechEngine(); setVoiceEnabled(!voiceEnabled); }}
+              >
+                {voiceEnabled ? '🔊 Voice Name On' : '🔇 Beep Only'}
+              </button>
               <div style={s.badgeOnline}>
                 {!isSheetConfigured
                   ? '⚠ Sheet URL Not Set'
@@ -593,14 +639,11 @@
                   <div style={s.card}>
                     <div style={{ fontSize: '12px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>1. Select Attendance Action</div>
                     <div style={s.modeGrid}>
-                      {/* Row 1: Check-In & Check-Out */}
-                      <button style={s.modeBtn(scanMode === 'CHECK_IN', '#10b981')} onClick={() => setScanMode('CHECK_IN')}>✓ Check-In</button>
-                      <button style={s.modeBtn(scanMode === 'CHECK_OUT', '#f43f5e')} onClick={() => setScanMode('CHECK_OUT')}>↪ Check-Out</button>
-                      {/* Row 2: Lunch Out & Post-Lunch */}
-                      <button style={s.modeBtn(scanMode === 'LUNCH_OUT', '#f59e0b')} onClick={() => setScanMode('LUNCH_OUT')}>☕ Lunch Out</button>
-                      <button style={s.modeBtn(scanMode === 'LUNCH_IN', '#3b82f6')} onClick={() => setScanMode('LUNCH_IN')}>⏱ Post-Lunch</button>
-                      {/* Row 3: Field Duty */}
-                      <button style={{ ...s.modeBtn(scanMode === 'FIELD_DUTY', '#a855f7'), gridColumn: 'span 2' }} onClick={() => setScanMode('FIELD_DUTY')}>🚗 Field Duty / Off-Site Visit</button>
+                      <button style={s.modeBtn(scanMode === 'CHECK_IN', '#10b981')} onClick={() => { unlockSpeechEngine(); setScanMode('CHECK_IN'); }}>✓ Check-In</button>
+                      <button style={s.modeBtn(scanMode === 'CHECK_OUT', '#f43f5e')} onClick={() => { unlockSpeechEngine(); setScanMode('CHECK_OUT'); }}>↪ Check-Out</button>
+                      <button style={s.modeBtn(scanMode === 'LUNCH_OUT', '#f59e0b')} onClick={() => { unlockSpeechEngine(); setScanMode('LUNCH_OUT'); }}>☕ Lunch Out</button>
+                      <button style={s.modeBtn(scanMode === 'LUNCH_IN', '#3b82f6')} onClick={() => { unlockSpeechEngine(); setScanMode('LUNCH_IN'); }}>⏱ Post Lunch In</button>
+                      <button style={{ ...s.modeBtn(scanMode === 'FIELD_DUTY', '#a855f7'), gridColumn: 'span 2' }} onClick={() => { unlockSpeechEngine(); setScanMode('FIELD_DUTY'); }}>🚗 Field Duty / Off-Site Visit</button>
                     </div>
 
                     <div style={{ fontSize: '12px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', marginTop: '18px' }}>2. Verification Requirement</div>
@@ -618,7 +661,7 @@
                       </span>
                       <button
                         style={{ ...s.primaryBtn, backgroundColor: cameraActive ? '#f43f5e' : '#10b981', padding: '6px 12px', fontSize: '12px' }}
-                        onClick={() => setCameraActive(!cameraActive)}
+                        onClick={() => { unlockSpeechEngine(); setCameraActive(!cameraActive); }}
                       >
                         {cameraActive ? 'Stop Camera' : '📷 Start Camera'}
                       </button>
@@ -666,175 +709,4 @@
                 <div style={s.card}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                     <span style={{ fontSize: '13px', fontWeight: 700, textTransform: 'uppercase', color: '#cbd5e1' }}>Live Activity Stream</span>
-                    <span style={{ fontSize: '12px', color: '#818cf8', fontWeight: 600 }}>{attendanceLogs.length} Total</span>
-                  </div>
-                  {attendanceLogs.length === 0 && (
-                    <div style={{ fontSize: '13px', color: '#64748b', textAlign: 'center', padding: '24px 0' }}>No scans recorded yet today.</div>
-                  )}
-                  {attendanceLogs.map(log => (
-                    <div key={log.id} style={s.logItem}>
-                      <div>
-                        <div style={{ fontWeight: 600, fontSize: '14px' }}>{log.name}</div>
-                        <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>
-                          <span style={{ backgroundColor: '#1e293b', padding: '2px 6px', borderRadius: '4px', marginRight: '8px' }}>{log.type.replace('_', ' ')}</span>
-                          {log.time} • <span style={{ color: '#818cf8' }}>{log.note}</span>
-                        </div>
-                      </div>
-                      <span style={{ fontSize: '11px', fontWeight: 600, color: log.synced ? '#34d399' : '#fbbf24' }}>
-                        {log.synced ? '✓ In Sheet' : 'Offline Queue'}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'employees' && (
-              <div>
-                <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges & Face Registration</h2>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Enroll each employee's face once for hands-free automatic check-in.</p>
-                  </div>
-                  <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
-                </div>
-
-                <div style={s.grid}>
-                  {employees.map(emp => (
-                    <div key={emp.id} style={s.card}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                            <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#818cf8', backgroundColor: 'rgba(99,102,241,0.15)', padding: '2px 8px', borderRadius: '6px' }}>{emp.id}</span>
-                            <span style={{ fontSize: '11px', fontWeight: 600, color: emp.faceDescriptor ? '#34d399' : '#fbbf24' }}>
-                              {emp.faceDescriptor ? '✓ Face Registered' : '⚠ No Face Yet'}
-                            </span>
-                          </div>
-                          <h3 style={{ margin: '8px 0 4px 0', fontSize: '16px' }}>{emp.name}</h3>
-                          <p style={{ margin: 0, fontSize: '12px', color: '#94a3b8' }}>{emp.role} • {emp.department}</p>
-                        </div>
-                        <div style={{ backgroundColor: '#ffffff', padding: '6px', borderRadius: '8px', flexShrink: 0 }}>
-                          <EmployeeQRCode value={emp.id} size={56} />
-                        </div>
-                      </div>
-                      <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #1e293b', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
-                        <button
-                          style={{ ...s.testBtn, backgroundColor: emp.faceDescriptor ? '#1e293b' : '#065f46', color: '#fff' }}
-                          onClick={() => setEnrollingEmp(emp)}
-                        >
-                          {emp.faceDescriptor ? '🔄 Re-Capture Face' : '📸 Register Face'}
-                        </button>
-                        <button style={s.testBtn} onClick={() => { processScanWithBiometrics(emp.id, 'FIELD_DUTY', false); setActiveTab('kiosk'); }}>
-                          🚗 Field Duty
-                        </button>
-                        <button style={s.primaryBtn} onClick={() => setSelectedBadge(emp)}>Print Badge</button>
-                        <button style={s.dangerBtn} onClick={() => handleRemoveEmployee(emp)}>🗑️ Remove</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {activeTab === 'reports' && (
-              <div style={s.card}>
-                <h2 style={{ margin: '0 0 6px 0', fontSize: '18px' }}>Altics Master Attendance Log</h2>
-                <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#94a3b8' }}>All scans synced automatically to your Google Sheet.</p>
-                <div style={{ overflowX: 'auto' }}>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
-                    <thead>
-                      <tr style={{ borderBottom: '1px solid #1e293b', color: '#94a3b8' }}>
-                        <th style={{ padding: '12px' }}>Employee</th>
-                        <th style={{ padding: '12px' }}>Action</th>
-                        <th style={{ padding: '12px' }}>Verification</th>
-                        <th style={{ padding: '12px' }}>Time</th>
-                        <th style={{ padding: '12px' }}>Google Sheet</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {attendanceLogs.map(log => (
-                        <tr key={log.id} style={{ borderBottom: '1px solid #1e293b' }}>
-                          <td style={{ padding: '12px', fontWeight: 600 }}>{log.name} ({log.empId})</td>
-                          <td style={{ padding: '12px' }}>{log.type.replace('_', ' ')}</td>
-                          <td style={{ padding: '12px', color: '#818cf8' }}>{log.note}</td>
-                          <td style={{ padding: '12px' }}>{log.time}</td>
-                          <td style={{ padding: '12px', color: log.synced ? '#34d399' : '#fbbf24' }}>{log.synced ? '✓ Synced' : 'Queued'}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-          </main>
-
-          {enrollingEmp && (
-            <div style={s.modalOverlay}>
-              <div style={{ ...s.card, width: '100%', maxWidth: '380px', textAlign: 'center' }}>
-                <h3 style={{ marginTop: 0 }}>Register Face: {enrollingEmp.name}</h3>
-                <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '14px' }}>{enrollMsg}</p>
-                <div style={{ width: '240px', height: '240px', margin: '0 auto 16px auto', borderRadius: '20px', overflow: 'hidden', border: '2px solid #4f46e5', backgroundColor: '#020617' }}>
-                  <video ref={enrollVideoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
-                </div>
-                <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
-                  <button type="button" style={s.testBtn} onClick={() => setEnrollingEmp(null)}>Cancel</button>
-                  <button type="button" style={s.primaryBtn} disabled={capturingFace} onClick={captureAndSaveFace}>
-                    {capturingFace ? 'Scanning...' : '📸 Capture & Save Face'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {showAddModal && (
-            <div style={s.modalOverlay}>
-              <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
-                <h3 style={{ marginTop: 0 }}>Enroll New Staff Member</h3>
-                <form onSubmit={handleAddEmployee}>
-                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Full Name</label>
-                  <input style={s.input} type="text" required value={newEmpName} onChange={e => setNewEmpName(e.target.value)} placeholder="e.g. Rahul Verma" />
-                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Department</label>
-                  <select style={s.input} value={newEmpDept} onChange={e => setNewEmpDept(e.target.value)}>
-                    <option value="Development">Development</option>
-                    <option value="Design">Design</option>
-                    <option value="Marketing">Marketing</option>
-                    <option value="Operations">Operations</option>
-                  </select>
-                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Role</label>
-                  <input style={s.input} type="text" value={newEmpRole} onChange={e => setNewEmpRole(e.target.value)} placeholder="e.g. Coordinator" />
-                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
-                    <button type="button" style={s.testBtn} onClick={() => setShowAddModal(false)}>Cancel</button>
-                    <button type="submit" style={s.primaryBtn}>Save & Generate QR</button>
-                  </div>
-                </form>
-              </div>
-            </div>
-          )}
-
-          {selectedBadge && (
-            <div style={s.modalOverlay}>
-              <div id="printable-badge" style={{ backgroundColor: '#ffffff', color: '#0f172a', borderRadius: '24px', padding: '28px', width: '100%', maxWidth: '320px', textAlign: 'center', boxShadow: '0 20px 40px rgba(0,0,0,0.4)' }}>
-                <div style={{ fontSize: '11px', fontWeight: 800, color: '#4f46e5', letterSpacing: '1.5px' }}>ALTICS BIOMETRIC ID</div>
-                <div style={{ margin: '18px auto', padding: '12px', backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', display: 'inline-block' }}>
-                  <EmployeeQRCode value={selectedBadge.id} size={160} />
-                </div>
-                <div style={{ fontFamily: 'monospace', fontSize: '13px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>{selectedBadge.id}</div>
-                <h3 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>{selectedBadge.name}</h3>
-                <p style={{ margin: '0 0 4px 0', fontSize: '13px', fontWeight: 600, color: '#4f46e5' }}>{selectedBadge.role}</p>
-                <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>{selectedBadge.department}</p>
-                <div className="no-print" style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
-                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#e2e8f0', fontWeight: 600, cursor: 'pointer' }} onClick={() => setSelectedBadge(null)}>Close</button>
-                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#4f46e5', color: '#fff', fontWeight: 600, cursor: 'pointer' }} onClick={() => window.print()}>Print Badge</button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    const root = ReactDOM.createRoot(document.getElementById('root'));
-    root.render(<AlticsKiosk />);
-  </script>
-</body>
-</html>
+                    <span style={{ fontSize: '12px', color: '#818cf8
