@@ -709,4 +709,175 @@
                 <div style={s.card}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                     <span style={{ fontSize: '13px', fontWeight: 700, textTransform: 'uppercase', color: '#cbd5e1' }}>Live Activity Stream</span>
-                    <span style={{ fontSize: '12px', color: '#818cf8
+                    <span style={{ fontSize: '12px', color: '#818cf8', fontWeight: 600 }}>{attendanceLogs.length} Total</span>
+                  </div>
+                  {attendanceLogs.length === 0 && (
+                    <div style={{ fontSize: '13px', color: '#64748b', textAlign: 'center', padding: '24px 0' }}>No scans recorded yet today.</div>
+                  )}
+                  {attendanceLogs.map(log => (
+                    <div key={log.id} style={s.logItem}>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: '14px' }}>{log.name}</div>
+                        <div style={{ fontSize: '12px', color: '#94a3b8', marginTop: '4px' }}>
+                          <span style={{ backgroundColor: '#1e293b', padding: '2px 6px', borderRadius: '4px', marginRight: '8px' }}>{log.type.replace('_', ' ')}</span>
+                          {log.time} • <span style={{ color: '#818cf8' }}>{log.note}</span>
+                        </div>
+                      </div>
+                      <span style={{ fontSize: '11px', fontWeight: 600, color: log.synced ? '#34d399' : '#fbbf24' }}>
+                        {log.synced ? '✓ In Sheet' : 'Offline Queue'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'employees' && (
+              <div>
+                <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges & Face Registration</h2>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Enroll each employee's face once for hands-free automatic check-in.</p>
+                  </div>
+                  <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
+                </div>
+
+                <div style={s.grid}>
+                  {employees.map(emp => (
+                    <div key={emp.id} style={s.card}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#818cf8', backgroundColor: 'rgba(99,102,241,0.15)', padding: '2px 8px', borderRadius: '6px' }}>{emp.id}</span>
+                            <span style={{ fontSize: '11px', fontWeight: 600, color: emp.faceDescriptor ? '#34d399' : '#fbbf24' }}>
+                              {emp.faceDescriptor ? '✓ Face Registered' : '⚠ No Face Yet'}
+                            </span>
+                          </div>
+                          <h3 style={{ margin: '8px 0 4px 0', fontSize: '16px' }}>{emp.name}</h3>
+                          <p style={{ margin: 0, fontSize: '12px', color: '#94a3b8' }}>{emp.role} • {emp.department}</p>
+                        </div>
+                        <div style={{ backgroundColor: '#ffffff', padding: '6px', borderRadius: '8px', flexShrink: 0 }}>
+                          <EmployeeQRCode value={emp.id} size={56} />
+                        </div>
+                      </div>
+                      <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #1e293b', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                        <button
+                          style={{ ...s.testBtn, backgroundColor: emp.faceDescriptor ? '#1e293b' : '#065f46', color: '#fff' }}
+                          onClick={() => setEnrollingEmp(emp)}
+                        >
+                          {emp.faceDescriptor ? '🔄 Re-Capture Face' : '📸 Register Face'}
+                        </button>
+                        <button style={s.testBtn} onClick={() => { processScanWithBiometrics(emp.id, 'FIELD_DUTY', false); setActiveTab('kiosk'); }}>
+                          🚗 Field Duty
+                        </button>
+                        <button style={s.primaryBtn} onClick={() => setSelectedBadge(emp)}>Print Badge</button>
+                        <button style={s.dangerBtn} onClick={() => handleRemoveEmployee(emp)}>🗑️ Remove</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'reports' && (
+              <div style={s.card}>
+                <h2 style={{ margin: '0 0 6px 0', fontSize: '18px' }}>Altics Master Attendance Log</h2>
+                <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#94a3b8' }}>All scans synced automatically to your Google Sheet.</p>
+                <div style={{ overflowX: 'auto' }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
+                    <thead>
+                      <tr style={{ borderBottom: '1px solid #1e293b', color: '#94a3b8' }}>
+                        <th style={{ padding: '12px' }}>Employee</th>
+                        <th style={{ padding: '12px' }}>Action</th>
+                        <th style={{ padding: '12px' }}>Verification</th>
+                        <th style={{ padding: '12px' }}>Time</th>
+                        <th style={{ padding: '12px' }}>Google Sheet</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {attendanceLogs.map(log => (
+                        <tr key={log.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                          <td style={{ padding: '12px', fontWeight: 600 }}>{log.name} ({log.empId})</td>
+                          <td style={{ padding: '12px' }}>{log.type.replace('_', ' ')}</td>
+                          <td style={{ padding: '12px', color: '#818cf8' }}>{log.note}</td>
+                          <td style={{ padding: '12px' }}>{log.time}</td>
+                          <td style={{ padding: '12px', color: log.synced ? '#34d399' : '#fbbf24' }}>{log.synced ? '✓ Synced' : 'Queued'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {enrollingEmp && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '380px', textAlign: 'center' }}>
+                <h3 style={{ marginTop: 0 }}>Register Face: {enrollingEmp.name}</h3>
+                <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '14px' }}>{enrollMsg}</p>
+                <div style={{ width: '240px', height: '240px', margin: '0 auto 16px auto', borderRadius: '20px', overflow: 'hidden', border: '2px solid #4f46e5', backgroundColor: '#020617' }}>
+                  <video ref={enrollVideoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+                </div>
+                <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+                  <button type="button" style={s.testBtn} onClick={() => setEnrollingEmp(null)}>Cancel</button>
+                  <button type="button" style={s.primaryBtn} disabled={capturingFace} onClick={captureAndSaveFace}>
+                    {capturingFace ? 'Scanning...' : '📸 Capture & Save Face'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showAddModal && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
+                <h3 style={{ marginTop: 0 }}>Enroll New Staff Member</h3>
+                <form onSubmit={handleAddEmployee}>
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Full Name</label>
+                  <input style={s.input} type="text" required value={newEmpName} onChange={e => setNewEmpName(e.target.value)} placeholder="e.g. Rahul Verma" />
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Department</label>
+                  <select style={s.input} value={newEmpDept} onChange={e => setNewEmpDept(e.target.value)}>
+                    <option value="Development">Development</option>
+                    <option value="Design">Design</option>
+                    <option value="Marketing">Marketing</option>
+                    <option value="Operations">Operations</option>
+                  </select>
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Role</label>
+                  <input style={s.input} type="text" value={newEmpRole} onChange={e => setNewEmpRole(e.target.value)} placeholder="e.g. Coordinator" />
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
+                    <button type="button" style={s.testBtn} onClick={() => setShowAddModal(false)}>Cancel</button>
+                    <button type="submit" style={s.primaryBtn}>Save & Generate QR</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {selectedBadge && (
+            <div style={s.modalOverlay}>
+              <div id="printable-badge" style={{ backgroundColor: '#ffffff', color: '#0f172a', borderRadius: '24px', padding: '28px', width: '100%', maxWidth: '320px', textAlign: 'center', boxShadow: '0 20px 40px rgba(0,0,0,0.4)' }}>
+                <div style={{ fontSize: '11px', fontWeight: 800, color: '#4f46e5', letterSpacing: '1.5px' }}>ALTICS BIOMETRIC ID</div>
+                <div style={{ margin: '18px auto', padding: '12px', backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', display: 'inline-block' }}>
+                  <EmployeeQRCode value={selectedBadge.id} size={160} />
+                </div>
+                <div style={{ fontFamily: 'monospace', fontSize: '13px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>{selectedBadge.id}</div>
+                <h3 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>{selectedBadge.name}</h3>
+                <p style={{ margin: '0 0 4px 0', fontSize: '13px', fontWeight: 600, color: '#4f46e5' }}>{selectedBadge.role}</p>
+                <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>{selectedBadge.department}</p>
+                <div className="no-print" style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
+                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#e2e8f0', fontWeight: 600, cursor: 'pointer' }} onClick={() => setSelectedBadge(null)}>Close</button>
+                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#4f46e5', color: '#fff', fontWeight: 600, cursor: 'pointer' }} onClick={() => window.print()}>Print Badge</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<AlticsKiosk />);
+  </script>
+</body>
+</html>
