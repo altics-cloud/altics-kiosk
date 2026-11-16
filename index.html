@@ -38,11 +38,7 @@
   <script type="text/babel">
     const { useState, useEffect, useMemo, useRef } = React;
 
-    // =========================================================================
-    // 👇 PASTE YOUR GOOGLE APPS SCRIPT /exec URL INSIDE THE QUOTES BELOW 👇
-    // =========================================================================
     const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
-    // =========================================================================
 
     const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
     const FACE_MATCH_THRESHOLD = 0.58;
@@ -76,7 +72,6 @@
       const [isSyncing, setIsSyncing] = useState(false);
       const [modelsLoaded, setModelsLoaded] = useState(false);
 
-      // Face Enrollment Modal State
       const [enrollingEmp, setEnrollingEmp] = useState(null);
       const [enrollMsg, setEnrollMsg] = useState('');
       const [capturingFace, setCapturingFace] = useState(false);
@@ -248,7 +243,6 @@
         }
       };
 
-      // Live Camera Scanner
       useEffect(() => {
         if (!cameraActive || activeTab !== 'kiosk' || enrollingEmp) {
           setLiveAiHint('');
