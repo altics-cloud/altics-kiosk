@@ -16,7 +16,7 @@
     * { box-sizing: border-box; }
     body { margin: 0; background-color: #020617; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; }
     #qr-reader { width: 100%; border-radius: 16px; overflow: hidden; border: none !important; }
-    #qr-reader video { border-radius: 16px; object-fit: cover; }
+    #qr-reader video { border-radius: 16px; object-fit: cover; transform: scaleX(-1); }
     @media print {
       body * { visibility: hidden; }
       #printable-badge, #printable-badge * { visibility: visible; }
@@ -41,11 +41,11 @@
     // =========================================================================
     // 👇 PASTE YOUR GOOGLE APPS SCRIPT /exec URL INSIDE THE QUOTES BELOW 👇
     // =========================================================================
-    const GOOGLE_SHEET_URL ="https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
+    const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
     // =========================================================================
 
     const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
-    const FACE_MATCH_THRESHOLD = 0.52;
+    const FACE_MATCH_THRESHOLD = 0.58; // Optimized for mobile front cameras & office lighting
 
     function EmployeeQRCode({ value, size = 140 }) {
       const svgMarkup = useMemo(() => {
@@ -67,9 +67,9 @@
     function AlticsKiosk() {
       const [activeTab, setActiveTab] = useState('kiosk');
       const [scanMode, setScanMode] = useState('CHECK_IN');
-      const [authPolicy, setAuthPolicy] = useState('BOTH'); // 'BOTH' | 'QR_ONLY' | 'FACE_ONLY'
+      const [authPolicy, setAuthPolicy] = useState('FACE_ONLY'); // Defaults to hands-free Face Only
       const [scanStatus, setScanStatus] = useState(null);
-      const [verifyingFace, setVerifyingFace] = useState(false);
+      const [liveAiHint, setLiveAiHint] = useState('');
       const [isOnline, setIsOnline] = useState(navigator.onLine);
       const [cameraActive, setCameraActive] = useState(false);
       const [isSyncing, setIsSyncing] = useState(false);
@@ -84,6 +84,7 @@
 
       const scannerRef = useRef(null);
       const faceLoopRef = useRef(null);
+      const isProcessingFaceRef = useRef(false);
       const lastScannedRef = useRef({ id: '', time: 0 });
       const scanModeRef = useRef(scanMode);
       scanModeRef.current = scanMode;
@@ -202,9 +203,10 @@
         return Math.sqrt(sum);
       };
 
-      // Live Camera Scanner (supports QR+Face, QR-Only, and Face-Only)
+      // Live Camera Scanner (auto-recognizes faces in FACE_ONLY mode with zero manual tap)
       useEffect(() => {
         if (!cameraActive || activeTab !== 'kiosk' || enrollingEmp) {
+          setLiveAiHint('');
           if (faceLoopRef.current) {
             clearInterval(faceLoopRef.current);
             faceLoopRef.current = null;
@@ -223,7 +225,7 @@
           { facingMode: "user" },
           { fps: 10, qrbox: { width: 200, height: 200 } },
           (decodedText) => {
-            if (authPolicyRef.current === 'FACE_ONLY') return; // Ignore QR in Face-Only mode
+            if (authPolicyRef.current === 'FACE_ONLY') return;
             const now = Date.now();
             if (decodedText === lastScannedRef.current.id && now - lastScannedRef.current.time < 4500) {
               return;
@@ -233,46 +235,68 @@
           },
           () => {}
         ).then(() => {
-          // Background loop for FACE_ONLY hands-free recognition
           faceLoopRef.current = setInterval(async () => {
-            if (authPolicyRef.current !== 'FACE_ONLY' || !modelsLoaded || !window.faceapi) return;
+            if (authPolicyRef.current !== 'FACE_ONLY' || isProcessingFaceRef.current) return;
+            if (!modelsLoaded || !window.faceapi) {
+              setLiveAiHint('Loading Face AI models...');
+              return;
+            }
+
+            const enrolledList = employeesRef.current.filter(e => Array.isArray(e.faceDescriptor));
+            if (enrolledList.length === 0) {
+              setLiveAiHint('⚠ No faces registered yet — go to Badges & Faces tab first');
+              return;
+            }
+
             const videoEl = document.querySelector('#qr-reader video');
             if (!videoEl || videoEl.readyState < 2) return;
 
-            const enrolledList = employeesRef.current.filter(e => Array.isArray(e.faceDescriptor));
-            if (enrolledList.length === 0) return;
+            isProcessingFaceRef.current = true;
+            try {
+              const detection = await window.faceapi
+                .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 }))
+                .withFaceLandmarks()
+                .withFaceDescriptor();
 
-            const detection = await window.faceapi
-              .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions())
-              .withFaceLandmarks()
-              .withFaceDescriptor();
-
-            if (!detection) return;
-
-            const liveDesc = Array.from(detection.descriptor);
-            let bestMatch = null;
-            let bestDist = Infinity;
-
-            for (const emp of enrolledList) {
-              const dist = euclideanDistance(liveDesc, emp.faceDescriptor);
-              if (dist < bestDist) {
-                bestDist = dist;
-                bestMatch = emp;
-              }
-            }
-
-            if (bestMatch && bestDist <= FACE_MATCH_THRESHOLD) {
-              const now = Date.now();
-              if (bestMatch.id === lastScannedRef.current.id && now - lastScannedRef.current.time < 5000) {
+              if (!detection) {
+                setLiveAiHint(`Scanning for ${enrolledList.length} registered face(s)... Look at camera`);
+                isProcessingFaceRef.current = false;
                 return;
               }
-              lastScannedRef.current = { id: bestMatch.id, time: now };
-              recordVerifiedLog(bestMatch, scanModeRef.current, 'Face Only Verified');
+
+              const liveDesc = Array.from(detection.descriptor);
+              let bestMatch = null;
+              let bestDist = Infinity;
+
+              for (const emp of enrolledList) {
+                const dist = euclideanDistance(liveDesc, emp.faceDescriptor);
+                if (dist < bestDist) {
+                  bestDist = dist;
+                  bestMatch = emp;
+                }
+              }
+
+              if (bestMatch && bestDist <= FACE_MATCH_THRESHOLD) {
+                const now = Date.now();
+                if (bestMatch.id === lastScannedRef.current.id && now - lastScannedRef.current.time < 6000) {
+                  setLiveAiHint(`✓ Already logged ${bestMatch.name} (next person step up)`);
+                  isProcessingFaceRef.current = false;
+                  return;
+                }
+                lastScannedRef.current = { id: bestMatch.id, time: now };
+                setLiveAiHint(`✓ Matched ${bestMatch.name}! Logging attendance...`);
+                await recordVerifiedLog(bestMatch, scanModeRef.current, 'Face Only Auto-Check-In');
+              } else {
+                setLiveAiHint('Face detected — not recognized (move closer or register face)');
+              }
+            } catch (e) {
+              // ignore transient frame read errors
             }
-          }, 1200);
+            isProcessingFaceRef.current = false;
+          }, 900);
         }).catch(() => {
           setCameraActive(false);
-          setScanStatus({ type: 'error', message: 'Camera permission denied. Allow camera in Chrome site settings or use tap buttons below.' });
+          setScanStatus({ type: 'error', message: 'Camera permission denied. Allow camera in Chrome site settings.' });
         });
 
         return () => {
@@ -287,7 +311,6 @@
         };
       }, [cameraActive, activeTab, enrollingEmp, modelsLoaded]);
 
-      // Start / Stop Enrollment Camera Modal
       useEffect(() => {
         if (!enrollingEmp) {
           if (enrollStreamRef.current) {
@@ -327,7 +350,7 @@
 
         try {
           const detection = await window.faceapi
-            .detectSingleFace(enrollVideoRef.current, new window.faceapi.TinyFaceDetectorOptions())
+            .detectSingleFace(enrollVideoRef.current, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 }))
             .withFaceLandmarks()
             .withFaceDescriptor();
 
@@ -431,30 +454,25 @@
           return;
         }
 
-        // policy === 'BOTH' (Strict QR + Face Match)
-        setVerifyingFace(true);
         let biometricNote = 'QR + Face Verified';
-
         if (employee.faceDescriptor && modelsLoaded) {
           setScanStatus({ type: 'info', message: `QR matched ${employee.name}. Verifying live face...` });
           const videoEl = document.querySelector('#qr-reader video');
 
           if (videoEl) {
             const detection = await window.faceapi
-              .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions())
+              .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 }))
               .withFaceLandmarks()
               .withFaceDescriptor();
 
             if (!detection) {
-              setVerifyingFace(false);
               playBeep(false);
-              setScanStatus({ type: 'error', message: `Face Not Visible: Hold QR badge slightly lower so your face is in the camera frame.` });
+              setScanStatus({ type: 'error', message: `Face Not Visible: Hold QR badge slightly lower so your face is in frame.` });
               return;
             }
 
             const distance = euclideanDistance(Array.from(detection.descriptor), employee.faceDescriptor);
             if (distance > FACE_MATCH_THRESHOLD) {
-              setVerifyingFace(false);
               playBeep(false);
               setScanStatus({ type: 'error', message: `Biometric Mismatch! Face does not match ${employee.name} (${employee.id}).` });
               return;
@@ -464,7 +482,6 @@
           biometricNote = 'QR Only (Face Not Enrolled)';
         }
 
-        setVerifyingFace(false);
         await recordVerifiedLog(employee, activeMode, biometricNote);
       };
 
@@ -527,9 +544,9 @@
       };
 
       const policyHint = {
-        BOTH: 'Hold QR badge below chin so both face & QR are visible',
+        FACE_ONLY: 'Look directly at the front camera — auto-logs with your name & time',
         QR_ONLY: 'Hold QR badge up to camera for instant badge check-in',
-        FACE_ONLY: 'Look directly at the front camera — no QR badge needed'
+        BOTH: 'Hold QR badge below chin so both face & QR are visible'
       };
 
       return (
@@ -546,7 +563,7 @@
               <div>
                 <h1 style={s.title}>Altics Biometric Kiosk</h1>
                 <p style={s.subtitle}>
-                  {modelsLoaded ? '✓ Face AI Ready • Flexible Verification' : 'Loading Face AI Models...'}
+                  {modelsLoaded ? '✓ Face AI Ready • Hands-Free Auto Check-In' : 'Loading Face AI Models...'}
                 </p>
               </div>
             </div>
@@ -587,16 +604,16 @@
 
                     <div style={{ fontSize: '12px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', marginTop: '18px' }}>2. Verification Requirement</div>
                     <div style={s.policyGrid}>
-                      <button style={s.policyBtn(authPolicy === 'BOTH')} onClick={() => setAuthPolicy('BOTH')}>QR + Face</button>
-                      <button style={s.policyBtn(authPolicy === 'QR_ONLY')} onClick={() => setAuthPolicy('QR_ONLY')}>QR Only</button>
                       <button style={s.policyBtn(authPolicy === 'FACE_ONLY')} onClick={() => setAuthPolicy('FACE_ONLY')}>Face Only</button>
+                      <button style={s.policyBtn(authPolicy === 'QR_ONLY')} onClick={() => setAuthPolicy('QR_ONLY')}>QR Only</button>
+                      <button style={s.policyBtn(authPolicy === 'BOTH')} onClick={() => setAuthPolicy('BOTH')}>QR + Face</button>
                     </div>
                   </div>
 
                   <div style={s.card}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ fontSize: '12px', color: '#34d399', fontWeight: 600 }}>
-                        ● Mode: {authPolicy === 'BOTH' ? 'QR + Face' : authPolicy === 'QR_ONLY' ? 'QR Badge Only' : 'Hands-Free Face'}
+                        ● Mode: {authPolicy === 'FACE_ONLY' ? 'Hands-Free Face' : authPolicy === 'QR_ONLY' ? 'QR Badge Only' : 'QR + Face'}
                       </span>
                       <button
                         style={{ ...s.primaryBtn, backgroundColor: cameraActive ? '#f43f5e' : '#10b981', padding: '6px 12px', fontSize: '12px' }}
@@ -612,10 +629,9 @@
                       ) : (
                         <>
                           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#818cf8" strokeWidth="2" style={{ marginBottom: '10px' }}>
-                            <rect x="3" y="3" width="7" height="7" />
-                            <rect x="14" y="3" width="7" height="7" />
-                            <rect x="3" y="14" width="7" height="7" />
-                            <rect x="14" y="14" width="7" height="7" />
+                            <circle cx="12" cy="10" r="3" />
+                            <path d="M7 18c1.5-2 8.5-2 10 0" />
+                            <rect x="3" y="3" width="18" height="18" rx="4" />
                           </svg>
                           <div style={{ fontSize: '14px', fontWeight: 600 }}>Tap "Start Camera" Above</div>
                           <div style={{ fontSize: '12px', color: '#64748b', marginTop: '4px' }}>{policyHint[authPolicy]}</div>
@@ -624,8 +640,8 @@
                     </div>
 
                     {cameraActive && (
-                      <div style={{ textAlign: 'center', fontSize: '12px', color: '#94a3b8' }}>
-                        {policyHint[authPolicy]}
+                      <div style={{ textAlign: 'center', fontSize: '12px', color: '#a5b4fc', fontWeight: 600 }}>
+                        {liveAiHint || policyHint[authPolicy]}
                       </div>
                     )}
 
@@ -633,7 +649,7 @@
 
                     <div style={{ marginTop: '20px', borderTop: '1px solid #1e293b', paddingTop: '16px' }}>
                       <div style={{ fontSize: '11px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', marginBottom: '10px' }}>
-                        Quick Tap Backup (or Mark Field Duty):
+                        Manual Quick-Tap Backup (Only if Camera Off):
                       </div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
                         {employees.map(emp => (
@@ -677,7 +693,7 @@
                 <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges & Face Registration</h2>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Enroll each employee's face once, print their QR badge, or remove former staff.</p>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Enroll each employee's face once for hands-free automatic check-in.</p>
                   </div>
                   <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
                 </div>
@@ -751,7 +767,6 @@
             )}
           </main>
 
-          {/* FACE ENROLLMENT MODAL */}
           {enrollingEmp && (
             <div style={s.modalOverlay}>
               <div style={{ ...s.card, width: '100%', maxWidth: '380px', textAlign: 'center' }}>
@@ -770,7 +785,6 @@
             </div>
           )}
 
-          {/* ADD STAFF MODAL */}
           {showAddModal && (
             <div style={s.modalOverlay}>
               <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
@@ -796,7 +810,6 @@
             </div>
           )}
 
-          {/* PRINT BADGE MODAL */}
           {selectedBadge && (
             <div style={s.modalOverlay}>
               <div id="printable-badge" style={{ backgroundColor: '#ffffff', color: '#0f172a', borderRadius: '24px', padding: '28px', width: '100%', maxWidth: '320px', textAlign: 'center', boxShadow: '0 20px 40px rgba(0,0,0,0.4)' }}>
