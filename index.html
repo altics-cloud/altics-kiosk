@@ -48,6 +48,11 @@
       return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
     }
 
+    function timeToMinutes(hhmm) {
+      const [h, m] = (hhmm || '10:00').split(':').map(Number);
+      return (h * 60) + (m || 0);
+    }
+
     function EmployeeQRCode({ value, size = 140 }) {
       const svgMarkup = useMemo(() => {
         if (typeof window === 'undefined' || !window.qrcode) return '';
@@ -77,11 +82,36 @@
       const [isSyncing, setIsSyncing] = useState(false);
       const [modelsLoaded, setModelsLoaded] = useState(false);
 
+      // Global Office Default Shift & Lunch Timings (10:00 AM - 06:15 PM, 30 min lunch)
+      const [shiftRules, setShiftRules] = useState(() => {
+        const saved = localStorage.getItem('altics_shift_rules_v2');
+        if (saved) { try { return JSON.parse(saved); } catch (e) {} }
+        return {
+          checkInTime: '10:00',
+          graceMinutes: 10,
+          checkOutTime: '18:15',
+          lunchStart: '13:00',
+          lunchEnd: '14:30',
+          maxLunchMinutes: 30
+        };
+      });
+
+      const shiftRulesRef = useRef(shiftRules);
+      shiftRulesRef.current = shiftRules;
+
+      useEffect(() => {
+        localStorage.setItem('altics_shift_rules_v2', JSON.stringify(shiftRules));
+      }, [shiftRules]);
+
       const [enrollingEmp, setEnrollingEmp] = useState(null);
       const [enrollMsg, setEnrollMsg] = useState('');
       const [capturingFace, setCapturingFace] = useState(false);
       const enrollVideoRef = useRef(null);
       const enrollStreamRef = useRef(null);
+
+      // Individual Shift Editor Modal State
+      const [editingShiftEmp, setEditingShiftEmp] = useState(null);
+      const [empShiftForm, setEmpShiftForm] = useState({ useCustom: false, checkInTime: '10:00', checkOutTime: '18:15', maxLunchMinutes: 30 });
 
       const scannerRef = useRef(null);
       const faceLoopRef = useRef(null);
@@ -98,11 +128,11 @@
         const saved = localStorage.getItem('altics_employees');
         if (saved) { try { return JSON.parse(saved); } catch (e) {} }
         return [
-          { id: 'EMP-101', name: 'Aarav Sharma', department: 'Development', role: 'Software Engineer', faceDescriptor: null },
-          { id: 'EMP-102', name: 'Priya Deshmukh', department: 'Design', role: 'UI/UX Lead', faceDescriptor: null },
-          { id: 'EMP-103', name: 'Rohan Kulkarni', department: 'Marketing', role: 'Growth Specialist', faceDescriptor: null },
-          { id: 'EMP-104', name: 'Ananya Patil', department: 'Operations', role: 'Project Manager', faceDescriptor: null },
-          { id: 'EMP-105', name: 'Vikram Joshi', department: 'Development', role: 'Backend Engineer', faceDescriptor: null }
+          { id: 'EMP-101', name: 'Aarav Sharma', department: 'Development', role: 'Software Engineer', faceDescriptor: null, customShift: null },
+          { id: 'EMP-102', name: 'Priya Deshmukh', department: 'Design', role: 'UI/UX Lead', faceDescriptor: null, customShift: null },
+          { id: 'EMP-103', name: 'Rohan Kulkarni', department: 'Marketing', role: 'Growth Specialist', faceDescriptor: null, customShift: null },
+          { id: 'EMP-104', name: 'Ananya Patil', department: 'Operations', role: 'Project Manager', faceDescriptor: null, customShift: null },
+          { id: 'EMP-105', name: 'Vikram Joshi', department: 'Development', role: 'Backend Engineer', faceDescriptor: null, customShift: null }
         ];
       });
 
@@ -122,9 +152,26 @@
       const [newEmpName, setNewEmpName] = useState('');
       const [newEmpDept, setNewEmpDept] = useState('Development');
       const [newEmpRole, setNewEmpRole] = useState('');
+      const [newEmpCustomShift, setNewEmpCustomShift] = useState(false);
+      const [newEmpIn, setNewEmpIn] = useState('10:00');
+      const [newEmpOut, setNewEmpOut] = useState('18:15');
+      const [newEmpLunch, setNewEmpLunch] = useState(30);
       const [selectedBadge, setSelectedBadge] = useState(null);
 
       const isSheetConfigured = GOOGLE_SHEET_URL && GOOGLE_SHEET_URL.startsWith('https://script.google.com/');
+
+      const getEffectiveRulesForEmployee = (employee) => {
+        const globalRules = shiftRulesRef.current;
+        if (employee && employee.customShift) {
+          return {
+            ...globalRules,
+            checkInTime: employee.customShift.checkInTime || globalRules.checkInTime,
+            checkOutTime: employee.customShift.checkOutTime || globalRules.checkOutTime,
+            maxLunchMinutes: employee.customShift.maxLunchMinutes || globalRules.maxLunchMinutes
+          };
+        }
+        return globalRules;
+      };
 
       useEffect(() => {
         const loadFaceModels = async () => {
@@ -251,19 +298,63 @@
         }
       };
 
-      // Check today's latest attendance state for an employee to block duplicate punches
+      const evaluateScheduleStatus = (employee, activeMode, nowDate) => {
+        const rules = getEffectiveRulesForEmployee(employee);
+        const nowMins = nowDate.getHours() * 60 + nowDate.getMinutes();
+
+        if (activeMode === 'CHECK_IN') {
+          const targetIn = timeToMinutes(rules.checkInTime) + Number(rules.graceMinutes || 0);
+          if (nowMins > targetIn) {
+            const lateBy = nowMins - timeToMinutes(rules.checkInTime);
+            return { tag: `Late +${lateBy}m`, spokenExtra: ', Late arrival noted' };
+          }
+          return { tag: 'On Time', spokenExtra: '' };
+        }
+
+        if (activeMode === 'CHECK_OUT') {
+          const targetOut = timeToMinutes(rules.checkOutTime);
+          if (nowMins < targetOut) {
+            const earlyBy = targetOut - nowMins;
+            return { tag: `Early -${earlyBy}m`, spokenExtra: ', Early checkout noted' };
+          }
+          return { tag: 'Full Shift', spokenExtra: '' };
+        }
+
+        if (activeMode === 'LUNCH_OUT') {
+          if (!employee.customShift) {
+            const lStart = timeToMinutes(rules.lunchStart);
+            const lEnd = timeToMinutes(rules.lunchEnd);
+            if (nowMins < lStart || nowMins > lEnd) {
+              return { tag: 'Outside Lunch Window', spokenExtra: '' };
+            }
+          }
+          return { tag: 'Lunch Break', spokenExtra: '' };
+        }
+
+        if (activeMode === 'LUNCH_IN') {
+          const todayKey = getTodayKey();
+          const lastLunchOut = attendanceLogsRef.current.find(
+            l => l.empId === employee.id && l.date === todayKey && l.type === 'LUNCH_OUT' && l.rawTs
+          );
+          if (lastLunchOut) {
+            const breakMins = Math.round((nowDate.getTime() - lastLunchOut.rawTs) / 60000);
+            if (breakMins > Number(rules.maxLunchMinutes || 30)) {
+              return { tag: `Lunch ${breakMins}m (Over)`, spokenExtra: ', Extended lunch noted' };
+            }
+            return { tag: `Lunch ${breakMins}m`, spokenExtra: '' };
+          }
+          return { tag: 'Returned', spokenExtra: '' };
+        }
+
+        return { tag: '', spokenExtra: '' };
+      };
+
       const validateDuplicateAction = (employee, activeMode) => {
         if (activeMode === 'FIELD_DUTY') return { allowed: true };
 
         const todayKey = getTodayKey();
-        // attendanceLogs is newest-first
         const todayEmpLogs = attendanceLogsRef.current.filter(l => {
-          const logDate = l.date || (l.id && l.id.startsWith('LOG-')
-            ? (() => {
-                const d = new Date(parseInt(l.id.replace('LOG-', ''), 10));
-                return isNaN(d.getTime()) ? todayKey : (d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'));
-              })()
-            : todayKey);
+          const logDate = l.date || todayKey;
           return l.empId === employee.id && logDate === todayKey && l.type !== 'FIELD_DUTY';
         });
 
@@ -410,7 +501,7 @@
                 }
 
                 setLiveAiHint(`✓ Matched ${bestMatch.name}! Logging attendance...`);
-                await recordVerifiedLog(bestMatch, scanModeRef.current, 'Face Only Auto-Check-In');
+                await recordVerifiedLog(bestMatch, scanModeRef.current, 'Face Only');
               } else {
                 setLiveAiHint('Face detected — not recognized (move closer or register face)');
               }
@@ -502,15 +593,20 @@
       const recordVerifiedLog = async (employee, activeMode, biometricNote) => {
         const now = new Date();
         const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const effectiveRules = getEffectiveRulesForEmployee(employee);
+        const sched = evaluateScheduleStatus(employee, activeMode, now);
+        const fullNote = sched.tag ? `${biometricNote} • ${sched.tag}` : biometricNote;
 
         const newLog = {
           id: 'LOG-' + Date.now(),
+          rawTs: now.getTime(),
           date: getTodayKey(),
           empId: employee.id,
           name: employee.name,
           type: activeMode,
           time: timeStr,
-          note: biometricNote,
+          note: fullNote,
+          shiftRules: effectiveRules,
           synced: false
         };
 
@@ -523,10 +619,10 @@
         };
 
         const spokenMessages = {
-          CHECK_IN: `Welcome, ${employee.name}, Checked In`,
-          CHECK_OUT: `Thank you, ${employee.name}, Checked Out`,
-          LUNCH_OUT: `${employee.name}, Lunch Out`,
-          LUNCH_IN: `Welcome back, ${employee.name}, Post Lunch In`,
+          CHECK_IN: `Welcome, ${employee.name}, Checked In${sched.spokenExtra}`,
+          CHECK_OUT: `Thank you, ${employee.name}, Checked Out${sched.spokenExtra}`,
+          LUNCH_OUT: `${employee.name}, Lunch Out${sched.spokenExtra}`,
+          LUNCH_IN: `Welcome back, ${employee.name}, Post Lunch In${sched.spokenExtra}`,
           FIELD_DUTY: `${employee.name}, Field Duty logged`
         };
 
@@ -545,7 +641,7 @@
 
         setScanStatus({
           type: 'success',
-          message: `${employee.name} — ${modeLabels[activeMode]} [${biometricNote}] (${syncNote})`
+          message: `${employee.name} — ${modeLabels[activeMode]} [${fullNote}] (${syncNote})`
         });
       };
 
@@ -624,11 +720,56 @@
           name: newEmpName,
           department: newEmpDept,
           role: newEmpRole || 'Staff Member',
-          faceDescriptor: null
+          faceDescriptor: null,
+          customShift: newEmpCustomShift
+            ? { checkInTime: newEmpIn, checkOutTime: newEmpOut, maxLunchMinutes: Number(newEmpLunch) || 30 }
+            : null
         }]);
         setNewEmpName('');
         setNewEmpRole('');
+        setNewEmpCustomShift(false);
         setShowAddModal(false);
+      };
+
+      const openEmpShiftEditor = (emp) => {
+        setEditingShiftEmp(emp);
+        if (emp.customShift) {
+          setEmpShiftForm({
+            useCustom: true,
+            checkInTime: emp.customShift.checkInTime || shiftRules.checkInTime,
+            checkOutTime: emp.customShift.checkOutTime || shiftRules.checkOutTime,
+            maxLunchMinutes: emp.customShift.maxLunchMinutes || shiftRules.maxLunchMinutes
+          });
+        } else {
+          setEmpShiftForm({
+            useCustom: false,
+            checkInTime: shiftRules.checkInTime,
+            checkOutTime: shiftRules.checkOutTime,
+            maxLunchMinutes: shiftRules.maxLunchMinutes
+          });
+        }
+      };
+
+      const saveEmpShift = (e) => {
+        e.preventDefault();
+        if (!editingShiftEmp) return;
+        setEmployees(prev =>
+          prev.map(emp =>
+            emp.id === editingShiftEmp.id
+              ? {
+                  ...emp,
+                  customShift: empShiftForm.useCustom
+                    ? {
+                        checkInTime: empShiftForm.checkInTime,
+                        checkOutTime: empShiftForm.checkOutTime,
+                        maxLunchMinutes: Number(empShiftForm.maxLunchMinutes) || 30
+                      }
+                    : null
+                }
+              : emp
+          )
+        );
+        setEditingShiftEmp(null);
       };
 
       const handleRemoveEmployee = (emp) => {
@@ -666,7 +807,7 @@
         logItem: { backgroundColor: '#020617', border: '1px solid #1e293b', padding: '12px 14px', borderRadius: '12px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' },
         primaryBtn: { backgroundColor: '#4f46e5', color: '#ffffff', border: 'none', padding: '10px 16px', borderRadius: '10px', fontSize: '13px', fontWeight: 600, cursor: 'pointer' },
         input: { width: '100%', backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '10px', padding: '10px 12px', color: '#ffffff', fontSize: '14px', marginTop: '6px', marginBottom: '14px' },
-        modalOverlay: { position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', zIndex: 50 }
+        modalOverlay: { position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', zIndex: 50, overflowY: 'auto' }
       };
 
       const policyHint = {
@@ -689,7 +830,7 @@
               <div>
                 <h1 style={s.title}>Altics Biometric Kiosk</h1>
                 <p style={s.subtitle}>
-                  {modelsLoaded ? '✓ Face AI Ready • Duplicate-Punch Guard Active' : 'Loading Face AI Models...'}
+                  Office Shift: {shiftRules.checkInTime} – {shiftRules.checkOutTime} ({shiftRules.maxLunchMinutes}m Lunch) • Custom Staff Shifts Active
                 </p>
               </div>
             </div>
@@ -716,7 +857,7 @@
             <nav style={s.nav}>
               <button style={s.navBtn(activeTab === 'kiosk')} onClick={() => setActiveTab('kiosk')}>Kiosk Terminal</button>
               <button style={s.navBtn(activeTab === 'employees')} onClick={() => setActiveTab('employees')}>Badges & Faces ({employees.length})</button>
-              <button style={s.navBtn(activeTab === 'reports')} onClick={() => setActiveTab('reports')}>Master Sheet</button>
+              <button style={s.navBtn(activeTab === 'reports')} onClick={() => setActiveTab('reports')}>Shift Rules & Logs</button>
             </nav>
           </header>
 
@@ -824,5 +965,301 @@
               <div>
                 <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
-                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges & Face Registration</h2>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Enroll each employee's face once for
+                    <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges, Face & Shift Timings</h2>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Assign individual shift timings or keep the office default ({shiftRules.checkInTime} – {shiftRules.checkOutTime}, {shiftRules.maxLunchMinutes}m lunch).</p>
+                  </div>
+                  <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
+                </div>
+
+                <div style={s.grid}>
+                  {employees.map(emp => (
+                    <div key={emp.id} style={s.card}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '12px' }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                            <span style={{ fontSize: '11px', fontFamily: 'monospace', color: '#818cf8', backgroundColor: 'rgba(99,102,241,0.15)', padding: '2px 8px', borderRadius: '6px' }}>{emp.id}</span>
+                            <span style={{ fontSize: '11px', fontWeight: 600, color: emp.faceDescriptor ? '#34d399' : '#fbbf24' }}>
+                              {emp.faceDescriptor ? '✓ Face Registered' : '⚠ No Face Yet'}
+                            </span>
+                          </div>
+                          <h3 style={{ margin: '8px 0 4px 0', fontSize: '16px' }}>{emp.name}</h3>
+                          <p style={{ margin: '0 0 6px 0', fontSize: '12px', color: '#94a3b8' }}>{emp.role} • {emp.department}</p>
+                          <div style={{ fontSize: '11px', color: emp.customShift ? '#a5b4fc' : '#64748b', fontWeight: 600 }}>
+                            {emp.customShift
+                              ? `⏰ Custom Shift: ${emp.customShift.checkInTime} – ${emp.customShift.checkOutTime} (Lunch ${emp.customShift.maxLunchMinutes}m)`
+                              : `⏰ Default Shift: ${shiftRules.checkInTime} – ${shiftRules.checkOutTime} (Lunch ${shiftRules.maxLunchMinutes}m)`}
+                          </div>
+                        </div>
+                        <div style={{ backgroundColor: '#ffffff', padding: '6px', borderRadius: '8px', flexShrink: 0 }}>
+                          <EmployeeQRCode value={emp.id} size={56} />
+                        </div>
+                      </div>
+                      <div style={{ marginTop: '16px', paddingTop: '12px', borderTop: '1px solid #1e293b', display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '8px' }}>
+                        <button
+                          style={{ ...s.testBtn, backgroundColor: emp.faceDescriptor ? '#1e293b' : '#065f46', color: '#fff' }}
+                          onClick={() => setEnrollingEmp(emp)}
+                        >
+                          {emp.faceDescriptor ? '🔄 Re-Capture Face' : '📸 Register Face'}
+                        </button>
+                        <button style={s.testBtn} onClick={() => openEmpShiftEditor(emp)}>
+                          ⏰ Shift
+                        </button>
+                        <button style={s.primaryBtn} onClick={() => setSelectedBadge(emp)}>Badge</button>
+                        <button style={s.dangerBtn} onClick={() => handleRemoveEmployee(emp)}>🗑️</button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'reports' && (
+              <div>
+                <div style={s.card}>
+                  <h2 style={{ margin: '0 0 6px 0', fontSize: '18px' }}>Default Office Shift & Lunch Timings</h2>
+                  <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#94a3b8' }}>Applies to all staff unless an individual custom shift is set in the Badges & Faces tab.</p>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '12px' }}>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Default Check-In</label>
+                      <input
+                        style={s.input}
+                        type="time"
+                        value={shiftRules.checkInTime}
+                        onChange={e => setShiftRules({ ...shiftRules, checkInTime: e.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Grace Period (mins)</label>
+                      <input
+                        style={s.input}
+                        type="number"
+                        min="0"
+                        max="60"
+                        value={shiftRules.graceMinutes}
+                        onChange={e => setShiftRules({ ...shiftRules, graceMinutes: Number(e.target.value) })}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Default Check-Out</label>
+                      <input
+                        style={s.input}
+                        type="time"
+                        value={shiftRules.checkOutTime}
+                        onChange={e => setShiftRules({ ...shiftRules, checkOutTime: e.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Lunch Window Start</label>
+                      <input
+                        style={s.input}
+                        type="time"
+                        value={shiftRules.lunchStart}
+                        onChange={e => setShiftRules({ ...shiftRules, lunchStart: e.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Lunch Window End</label>
+                      <input
+                        style={s.input}
+                        type="time"
+                        value={shiftRules.lunchEnd}
+                        onChange={e => setShiftRules({ ...shiftRules, lunchEnd: e.target.value })}
+                      />
+                    </div>
+                    <div>
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Default Max Lunch (mins)</label>
+                      <input
+                        style={s.input}
+                        type="number"
+                        min="10"
+                        max="120"
+                        value={shiftRules.maxLunchMinutes}
+                        onChange={e => setShiftRules({ ...shiftRules, maxLunchMinutes: Number(e.target.value) })}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div style={s.card}>
+                  <h2 style={{ margin: '0 0 6px 0', fontSize: '18px' }}>Altics Master Attendance Log</h2>
+                  <p style={{ margin: '0 0 16px 0', fontSize: '12px', color: '#94a3b8' }}>All scans synced automatically to your Google Sheet.</p>
+                  <div style={{ overflowX: 'auto' }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '13px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid #1e293b', color: '#94a3b8' }}>
+                          <th style={{ padding: '12px' }}>Employee</th>
+                          <th style={{ padding: '12px' }}>Action</th>
+                          <th style={{ padding: '12px' }}>Status & Verification</th>
+                          <th style={{ padding: '12px' }}>Time</th>
+                          <th style={{ padding: '12px' }}>Google Sheet</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {attendanceLogs.map(log => (
+                          <tr key={log.id} style={{ borderBottom: '1px solid #1e293b' }}>
+                            <td style={{ padding: '12px', fontWeight: 600 }}>{log.name} ({log.empId})</td>
+                            <td style={{ padding: '12px' }}>{log.type.replace('_', ' ')}</td>
+                            <td style={{ padding: '12px', color: '#818cf8' }}>{log.note}</td>
+                            <td style={{ padding: '12px' }}>{log.time}</td>
+                            <td style={{ padding: '12px', color: log.synced ? '#34d399' : '#fbbf24' }}>{log.synced ? '✓ Synced' : 'Queued'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            )}
+          </main>
+
+          {editingShiftEmp && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
+                <h3 style={{ marginTop: 0 }}>Shift Timing: {editingShiftEmp.name}</h3>
+                <form onSubmit={saveEmpShift}>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', marginBottom: '14px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={empShiftForm.useCustom}
+                      onChange={e => setEmpShiftForm({ ...empShiftForm, useCustom: e.target.checked })}
+                    />
+                    Use custom shift timings for this employee
+                  </label>
+
+                  {empShiftForm.useCustom ? (
+                    <>
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Personal Check-In Time</label>
+                      <input
+                        style={s.input}
+                        type="time"
+                        required
+                        value={empShiftForm.checkInTime}
+                        onChange={e => setEmpShiftForm({ ...empShiftForm, checkInTime: e.target.value })}
+                      />
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Personal Check-Out Time</label>
+                      <input
+                        style={s.input}
+                        type="time"
+                        required
+                        value={empShiftForm.checkOutTime}
+                        onChange={e => setEmpShiftForm({ ...empShiftForm, checkOutTime: e.target.value })}
+                      />
+                      <label style={{ fontSize: '12px', color: '#94a3b8' }}>Max Lunch Break (mins)</label>
+                      <input
+                        style={s.input}
+                        type="number"
+                        min="10"
+                        max="120"
+                        required
+                        value={empShiftForm.maxLunchMinutes}
+                        onChange={e => setEmpShiftForm({ ...empShiftForm, maxLunchMinutes: Number(e.target.value) })}
+                      />
+                    </>
+                  ) : (
+                    <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '16px' }}>
+                      Currently following default office shift ({shiftRules.checkInTime} – {shiftRules.checkOutTime}, {shiftRules.maxLunchMinutes}m lunch).
+                    </p>
+                  )}
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                    <button type="button" style={s.testBtn} onClick={() => setEditingShiftEmp(null)}>Cancel</button>
+                    <button type="submit" style={s.primaryBtn}>Save Shift</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {enrollingEmp && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '380px', textAlign: 'center' }}>
+                <h3 style={{ marginTop: 0 }}>Register Face: {enrollingEmp.name}</h3>
+                <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '14px' }}>{enrollMsg}</p>
+                <div style={{ width: '240px', height: '240px', margin: '0 auto 16px auto', borderRadius: '20px', overflow: 'hidden', border: '2px solid #4f46e5', backgroundColor: '#020617' }}>
+                  <video ref={enrollVideoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+                </div>
+                <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+                  <button type="button" style={s.testBtn} onClick={() => setEnrollingEmp(null)}>Cancel</button>
+                  <button type="button" style={s.primaryBtn} disabled={capturingFace} onClick={captureAndSaveFace}>
+                    {capturingFace ? 'Scanning...' : '📸 Capture & Save Face'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showAddModal && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
+                <h3 style={{ marginTop: 0 }}>Enroll New Staff Member</h3>
+                <form onSubmit={handleAddEmployee}>
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Full Name</label>
+                  <input style={s.input} type="text" required value={newEmpName} onChange={e => setNewEmpName(e.target.value)} placeholder="e.g. Rahul Verma" />
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Department</label>
+                  <select style={s.input} value={newEmpDept} onChange={e => setNewEmpDept(e.target.value)}>
+                    <option value="Development">Development</option>
+                    <option value="Design">Design</option>
+                    <option value="Marketing">Marketing</option>
+                    <option value="Operations">Operations</option>
+                  </select>
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Role</label>
+                  <input style={s.input} type="text" value={newEmpRole} onChange={e => setNewEmpRole(e.target.value)} placeholder="e.g. Coordinator" />
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', marginBottom: '12px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={newEmpCustomShift}
+                      onChange={e => setNewEmpCustomShift(e.target.checked)}
+                    />
+                    Set custom shift timings (different from office default)
+                  </label>
+
+                  {newEmpCustomShift && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                      <div>
+                        <label style={{ fontSize: '11px', color: '#94a3b8' }}>Check-In</label>
+                        <input style={s.input} type="time" value={newEmpIn} onChange={e => setNewEmpIn(e.target.value)} />
+                      </div>
+                      <div>
+                        <label style={{ fontSize: '11px', color: '#94a3b8' }}>Check-Out</label>
+                        <input style={s.input} type="time" value={newEmpOut} onChange={e => setNewEmpOut(e.target.value)} />
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
+                    <button type="button" style={s.testBtn} onClick={() => setShowAddModal(false)}>Cancel</button>
+                    <button type="submit" style={s.primaryBtn}>Save & Generate QR</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {selectedBadge && (
+            <div style={s.modalOverlay}>
+              <div id="printable-badge" style={{ backgroundColor: '#ffffff', color: '#0f172a', borderRadius: '24px', padding: '28px', width: '100%', maxWidth: '320px', textAlign: 'center', boxShadow: '0 20px 40px rgba(0,0,0,0.4)' }}>
+                <div style={{ fontSize: '11px', fontWeight: 800, color: '#4f46e5', letterSpacing: '1.5px' }}>ALTICS BIOMETRIC ID</div>
+                <div style={{ margin: '18px auto', padding: '12px', backgroundColor: '#ffffff', border: '2px solid #e2e8f0', borderRadius: '16px', display: 'inline-block' }}>
+                  <EmployeeQRCode value={selectedBadge.id} size={160} />
+                </div>
+                <div style={{ fontFamily: 'monospace', fontSize: '13px', fontWeight: 700, color: '#334155', marginBottom: '6px' }}>{selectedBadge.id}</div>
+                <h3 style={{ margin: '0 0 4px 0', fontSize: '20px' }}>{selectedBadge.name}</h3>
+                <p style={{ margin: '0 0 4px 0', fontSize: '13px', fontWeight: 600, color: '#4f46e5' }}>{selectedBadge.role}</p>
+                <p style={{ margin: 0, fontSize: '12px', color: '#64748b' }}>{selectedBadge.department}</p>
+                <div className="no-print" style={{ display: 'flex', gap: '10px', marginTop: '24px' }}>
+                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#e2e8f0', fontWeight: 600, cursor: 'pointer' }} onClick={() => setSelectedBadge(null)}>Close</button>
+                  <button style={{ flex: 1, padding: '10px', borderRadius: '10px', border: 'none', backgroundColor: '#4f46e5', color: '#fff', fontWeight: 600, cursor: 'pointer' }} onClick={() => window.print()}>Print Badge</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<AlticsKiosk />);
+  </script>
+</body>
+</html>
