@@ -41,9 +41,9 @@
     const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
 
     const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
-    const FACE_MATCH_THRESHOLD = 0.42; // Ultra-strict threshold to stop name mix-ups
-    const FACE_MARGIN_MIN = 0.07;      // Required gap between #1 and #2 closest faces
-    const DEBOUNCE_MS = 5000;          // 5-second lock prevents 0.123s duplicate punches
+    const FACE_MATCH_THRESHOLD = 0.42;
+    const FACE_MARGIN_MIN = 0.07;
+    const DEBOUNCE_MS = 5000;
 
     function getTodayKey() {
       const d = new Date();
@@ -130,8 +130,8 @@
       const scannerRef = useRef(null);
       const faceLoopRef = useRef(null);
       const isProcessingFaceRef = useRef(false);
-      const actionLockMapRef = useRef({}); // Per-employee 5s debounce lock (blocks 0.123s duplicates)
-      const consecutiveMatchRef = useRef({ empId: null, count: 0 }); // Requires 2 consecutive matching frames
+      const actionLockMapRef = useRef({});
+      const consecutiveMatchRef = useRef({ empId: null, count: 0 });
       const scanModeRef = useRef(scanMode);
       scanModeRef.current = scanMode;
       const authPolicyRef = useRef(authPolicy);
@@ -164,6 +164,7 @@
       attendanceLogsRef.current = attendanceLogs;
 
       const [showAddModal, setShowAddModal] = useState(false);
+      const [newEmpId, setNewEmpId] = useState('');
       const [newEmpName, setNewEmpName] = useState('');
       const [newEmpDept, setNewEmpDept] = useState('Development');
       const [newEmpRole, setNewEmpRole] = useState('');
@@ -174,6 +175,14 @@
       const [selectedBadge, setSelectedBadge] = useState(null);
 
       const isSheetConfigured = GOOGLE_SHEET_URL && GOOGLE_SHEET_URL.startsWith('https://script.google.com/');
+
+      const getNextAutoEmpId = () => {
+        const maxNum = employees.reduce((max, emp) => {
+          const num = parseInt(String(emp.id).replace(/\D/g, ''), 10);
+          return !isNaN(num) && num > max ? num : max;
+        }, 100);
+        return 'EMP-' + (maxNum + 1);
+      };
 
       const getEffectiveRulesForEmployee = (employee) => {
         const globalRules = shiftRulesRef.current;
@@ -508,7 +517,6 @@
               if (result.match) {
                 const bestMatch = result.match;
 
-                // Require 2 consecutive matching frames for the exact same employee
                 if (consecutiveMatchRef.current.empId === bestMatch.id) {
                   consecutiveMatchRef.current.count += 1;
                 } else {
@@ -523,7 +531,6 @@
                   return;
                 }
 
-                // 5-second debounce lock check
                 const now = Date.now();
                 if (actionLockMapRef.current[bestMatch.id] && (now - actionLockMapRef.current[bestMatch.id]) < DEBOUNCE_MS) {
                   setLiveAiHint(`✓ Scanned ${bestMatch.name} (${result.confidence}% match)`);
@@ -663,7 +670,6 @@
           synced: false
         };
 
-        // Immediately update ref & UI state BEFORE network await to eliminate 0.123s race conditions
         attendanceLogsRef.current = [newLog, ...attendanceLogsRef.current];
         setAttendanceLogs(prev => [newLog, ...prev]);
 
@@ -709,7 +715,7 @@
         const activeMode = overrideMode || scanMode;
         const policy = authPolicyRef.current;
         const cleanId = scannedId.trim();
-        const employee = employeesRef.current.find(e => e.id === cleanId || e.name.toLowerCase() === cleanId.toLowerCase());
+        const employee = employeesRef.current.find(e => e.id.toLowerCase() === cleanId.toLowerCase() || e.name.toLowerCase() === cleanId.toLowerCase());
 
         if (!employee) {
           playBeepAndSpeak(false, 'Unknown badge');
@@ -717,7 +723,6 @@
           return;
         }
 
-        // 5-second debounce lock blocks double-taps & simultaneous Manual + Camera scans
         const now = Date.now();
         if (actionLockMapRef.current[employee.id] && (now - actionLockMapRef.current[employee.id]) < DEBOUNCE_MS) {
           return;
@@ -775,22 +780,27 @@
 
       const handleAddEmployee = (e) => {
         e.preventDefault();
-        if (!newEmpName) return;
-        const maxNum = employees.reduce((max, emp) => {
-          const num = parseInt(emp.id.replace('EMP-', ''), 10);
-          return !isNaN(num) && num > max ? num : max;
-        }, 100);
-        const newId = 'EMP-' + (maxNum + 1);
+        if (!newEmpName.trim()) return;
+
+        const finalId = newEmpId.trim() ? newEmpId.trim().toUpperCase() : getNextAutoEmpId();
+        const duplicate = employees.find(emp => emp.id.toLowerCase() === finalId.toLowerCase());
+        if (duplicate) {
+          window.alert(`Employee ID "${finalId}" already belongs to ${duplicate.name}. Please enter a unique ID.`);
+          return;
+        }
+
         setEmployees([...employees, {
-          id: newId,
-          name: newEmpName,
+          id: finalId,
+          name: newEmpName.trim(),
           department: newEmpDept,
-          role: newEmpRole || 'Staff Member',
+          role: newEmpRole.trim() || 'Staff Member',
           faceDescriptor: null,
           customShift: newEmpCustomShift
             ? { checkInTime: newEmpIn, checkOutTime: newEmpOut, maxLunchMinutes: Number(newEmpLunch) || 30 }
             : null
         }]);
+
+        setNewEmpId('');
         setNewEmpName('');
         setNewEmpRole('');
         setNewEmpCustomShift(false);
@@ -1259,6 +1269,14 @@
               <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
                 <h3 style={{ marginTop: 0 }}>Enroll New Staff Member</h3>
                 <form onSubmit={handleAddEmployee}>
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Employee ID (optional — auto-generates if blank)</label>
+                  <input
+                    style={s.input}
+                    type="text"
+                    value={newEmpId}
+                    onChange={e => setNewEmpId(e.target.value)}
+                    placeholder={`e.g. ${getNextAutoEmpId()} or ALT-01`}
+                  />
                   <label style={{ fontSize: '12px', color: '#94a3b8' }}>Full Name</label>
                   <input style={s.input} type="text" required value={newEmpName} onChange={e => setNewEmpName(e.target.value)} placeholder="e.g. Rahul Verma" />
                   <label style={{ fontSize: '12px', color: '#94a3b8' }}>Department</label>
