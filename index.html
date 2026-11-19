@@ -41,7 +41,9 @@
     const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
 
     const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
-    const FACE_MATCH_THRESHOLD = 0.58;
+    const FACE_MATCH_THRESHOLD = 0.42; // Ultra-strict threshold to stop name mix-ups
+    const FACE_MARGIN_MIN = 0.07;      // Required gap between #1 and #2 closest faces
+    const DEBOUNCE_MS = 5000;          // 5-second lock prevents 0.123s duplicate punches
 
     function getTodayKey() {
       const d = new Date();
@@ -49,8 +51,22 @@
     }
 
     function timeToMinutes(hhmm) {
-      const [h, m] = (hhmm || '09:30').split(':').map(Number);
+      const [h, m] = (hhmm || '10:00').split(':').map(Number);
       return (h * 60) + (m || 0);
+    }
+
+    function averageDescriptors(descriptors) {
+      const len = descriptors[0].length;
+      const avg = new Array(len).fill(0);
+      for (const desc of descriptors) {
+        for (let i = 0; i < len; i++) {
+          avg[i] += desc[i];
+        }
+      }
+      for (let i = 0; i < len; i++) {
+        avg[i] /= descriptors.length;
+      }
+      return avg;
     }
 
     function EmployeeQRCode({ value, size = 140 }) {
@@ -82,17 +98,16 @@
       const [isSyncing, setIsSyncing] = useState(false);
       const [modelsLoaded, setModelsLoaded] = useState(false);
 
-      // Global Office Default Shift & Lunch Timings
       const [shiftRules, setShiftRules] = useState(() => {
-        const saved = localStorage.getItem('altics_shift_rules');
+        const saved = localStorage.getItem('altics_shift_rules_v3');
         if (saved) { try { return JSON.parse(saved); } catch (e) {} }
         return {
-          checkInTime: '09:30',
+          checkInTime: '10:00',
           graceMinutes: 10,
-          checkOutTime: '18:30',
+          checkOutTime: '18:15',
           lunchStart: '13:00',
           lunchEnd: '14:30',
-          maxLunchMinutes: 45
+          maxLunchMinutes: 30
         };
       });
 
@@ -100,7 +115,7 @@
       shiftRulesRef.current = shiftRules;
 
       useEffect(() => {
-        localStorage.setItem('altics_shift_rules', JSON.stringify(shiftRules));
+        localStorage.setItem('altics_shift_rules_v3', JSON.stringify(shiftRules));
       }, [shiftRules]);
 
       const [enrollingEmp, setEnrollingEmp] = useState(null);
@@ -109,14 +124,14 @@
       const enrollVideoRef = useRef(null);
       const enrollStreamRef = useRef(null);
 
-      // Individual Shift Editor Modal State
       const [editingShiftEmp, setEditingShiftEmp] = useState(null);
-      const [empShiftForm, setEmpShiftForm] = useState({ useCustom: false, checkInTime: '09:30', checkOutTime: '18:30', maxLunchMinutes: 45 });
+      const [empShiftForm, setEmpShiftForm] = useState({ useCustom: false, checkInTime: '10:00', checkOutTime: '18:15', maxLunchMinutes: 30 });
 
       const scannerRef = useRef(null);
       const faceLoopRef = useRef(null);
       const isProcessingFaceRef = useRef(false);
-      const lastScannedRef = useRef({ id: '', time: 0 });
+      const actionLockMapRef = useRef({}); // Per-employee 5s debounce lock (blocks 0.123s duplicates)
+      const consecutiveMatchRef = useRef({ empId: null, count: 0 }); // Requires 2 consecutive matching frames
       const scanModeRef = useRef(scanMode);
       scanModeRef.current = scanMode;
       const authPolicyRef = useRef(authPolicy);
@@ -153,14 +168,13 @@
       const [newEmpDept, setNewEmpDept] = useState('Development');
       const [newEmpRole, setNewEmpRole] = useState('');
       const [newEmpCustomShift, setNewEmpCustomShift] = useState(false);
-      const [newEmpIn, setNewEmpIn] = useState('09:30');
-      const [newEmpOut, setNewEmpOut] = useState('18:30');
-      const [newEmpLunch, setNewEmpLunch] = useState(45);
+      const [newEmpIn, setNewEmpIn] = useState('10:00');
+      const [newEmpOut, setNewEmpOut] = useState('18:15');
+      const [newEmpLunch, setNewEmpLunch] = useState(30);
       const [selectedBadge, setSelectedBadge] = useState(null);
 
       const isSheetConfigured = GOOGLE_SHEET_URL && GOOGLE_SHEET_URL.startsWith('https://script.google.com/');
 
-      // Resolve effective shift rules for a specific employee (custom override or global default)
       const getEffectiveRulesForEmployee = (employee) => {
         const globalRules = shiftRulesRef.current;
         if (employee && employee.customShift) {
@@ -339,7 +353,7 @@
           );
           if (lastLunchOut) {
             const breakMins = Math.round((nowDate.getTime() - lastLunchOut.rawTs) / 60000);
-            if (breakMins > Number(rules.maxLunchMinutes || 45)) {
+            if (breakMins > Number(rules.maxLunchMinutes || 30)) {
               return { tag: `Lunch ${breakMins}m (Over)`, spokenExtra: ', Extended lunch noted' };
             }
             return { tag: `Lunch ${breakMins}m`, spokenExtra: '' };
@@ -411,9 +425,30 @@
         return { allowed: true };
       };
 
+      const findStrictFaceMatch = (liveDesc, enrolledList) => {
+        const ranked = enrolledList
+          .map(emp => ({ emp, dist: euclideanDistance(liveDesc, emp.faceDescriptor) }))
+          .sort((a, b) => a.dist - b.dist);
+
+        const best = ranked[0];
+        const runnerUp = ranked[1];
+
+        if (!best || best.dist > FACE_MATCH_THRESHOLD) {
+          return { match: null, reason: 'unrecognized', bestDist: best ? best.dist : Infinity };
+        }
+
+        if (runnerUp && (runnerUp.dist - best.dist) < FACE_MARGIN_MIN) {
+          return { match: null, reason: 'ambiguous', bestDist: best.dist };
+        }
+
+        const confidence = Math.max(75, Math.min(99, Math.round((1 - best.dist) * 130)));
+        return { match: best.emp, confidence, bestDist: best.dist };
+      };
+
       useEffect(() => {
         if (!cameraActive || activeTab !== 'kiosk' || enrollingEmp) {
           setLiveAiHint('');
+          consecutiveMatchRef.current = { empId: null, count: 0 };
           if (faceLoopRef.current) {
             clearInterval(faceLoopRef.current);
             faceLoopRef.current = null;
@@ -433,11 +468,6 @@
           { fps: 10, qrbox: { width: 200, height: 200 } },
           (decodedText) => {
             if (authPolicyRef.current === 'FACE_ONLY') return;
-            const now = Date.now();
-            if (decodedText === lastScannedRef.current.id && now - lastScannedRef.current.time < 4500) {
-              return;
-            }
-            lastScannedRef.current = { id: decodedText, time: now };
             processScanWithBiometrics(decodedText, scanModeRef.current, true);
           },
           () => {}
@@ -461,36 +491,47 @@
             isProcessingFaceRef.current = true;
             try {
               const detection = await window.faceapi
-                .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 }))
+                .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.6 }))
                 .withFaceLandmarks()
                 .withFaceDescriptor();
 
               if (!detection) {
-                setLiveAiHint(`Scanning for ${enrolledList.length} registered face(s)... Look at camera`);
+                consecutiveMatchRef.current = { empId: null, count: 0 };
+                setLiveAiHint(`Scanning for ${enrolledList.length} registered face(s)... Look straight at camera`);
                 isProcessingFaceRef.current = false;
                 return;
               }
 
               const liveDesc = Array.from(detection.descriptor);
-              let bestMatch = null;
-              let bestDist = Infinity;
+              const result = findStrictFaceMatch(liveDesc, enrolledList);
 
-              for (const emp of enrolledList) {
-                const dist = euclideanDistance(liveDesc, emp.faceDescriptor);
-                if (dist < bestDist) {
-                  bestDist = dist;
-                  bestMatch = emp;
-                }
-              }
+              if (result.match) {
+                const bestMatch = result.match;
 
-              if (bestMatch && bestDist <= FACE_MATCH_THRESHOLD) {
-                const now = Date.now();
-                if (bestMatch.id === lastScannedRef.current.id && now - lastScannedRef.current.time < 6000) {
-                  setLiveAiHint(`✓ Scanned ${bestMatch.name} (next person step up)`);
+                // Require 2 consecutive matching frames for the exact same employee
+                if (consecutiveMatchRef.current.empId === bestMatch.id) {
+                  consecutiveMatchRef.current.count += 1;
+                } else {
+                  consecutiveMatchRef.current = { empId: bestMatch.id, count: 1 };
+                  setLiveAiHint(`Verifying ${bestMatch.name}... Hold still (1/2)`);
                   isProcessingFaceRef.current = false;
                   return;
                 }
-                lastScannedRef.current = { id: bestMatch.id, time: now };
+
+                if (consecutiveMatchRef.current.count < 2) {
+                  isProcessingFaceRef.current = false;
+                  return;
+                }
+
+                // 5-second debounce lock check
+                const now = Date.now();
+                if (actionLockMapRef.current[bestMatch.id] && (now - actionLockMapRef.current[bestMatch.id]) < DEBOUNCE_MS) {
+                  setLiveAiHint(`✓ Scanned ${bestMatch.name} (${result.confidence}% match)`);
+                  isProcessingFaceRef.current = false;
+                  return;
+                }
+                actionLockMapRef.current[bestMatch.id] = now;
+                consecutiveMatchRef.current = { empId: null, count: 0 };
 
                 const check = validateDuplicateAction(bestMatch, scanModeRef.current);
                 if (!check.allowed) {
@@ -501,14 +542,18 @@
                   return;
                 }
 
-                setLiveAiHint(`✓ Matched ${bestMatch.name}! Logging attendance...`);
-                await recordVerifiedLog(bestMatch, scanModeRef.current, 'Face Only');
+                setLiveAiHint(`✓ Verified ${bestMatch.name} (${result.confidence}%)! Logging...`);
+                await recordVerifiedLog(bestMatch, scanModeRef.current, `Face Only (${result.confidence}%)`);
+              } else if (result.reason === 'ambiguous') {
+                consecutiveMatchRef.current = { empId: null, count: 0 };
+                setLiveAiHint('⚠ Similar match detected — step closer & look straight at lens');
               } else {
-                setLiveAiHint('Face detected — not recognized (move closer or register face)');
+                consecutiveMatchRef.current = { empId: null, count: 0 };
+                setLiveAiHint('Face not recognized — step closer or re-register face in Badges tab');
               }
             } catch (e) {}
             isProcessingFaceRef.current = false;
-          }, 900);
+          }, 750);
         }).catch(() => {
           setCameraActive(false);
           setScanStatus({ type: 'error', message: 'Camera permission denied. Allow camera in Chrome site settings.' });
@@ -535,7 +580,7 @@
           return;
         }
 
-        setEnrollMsg('Position face clearly in the frame and tap Capture Face.');
+        setEnrollMsg('Look straight at the camera in good lighting (remove mask/sunglasses) and tap Capture.');
         navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
           .then(stream => {
             enrollStreamRef.current = stream;
@@ -562,29 +607,36 @@
           return;
         }
         setCapturingFace(true);
-        setEnrollMsg('Analyzing facial landmarks...');
+        const samples = [];
 
         try {
-          const detection = await window.faceapi
-            .detectSingleFace(enrollVideoRef.current, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 }))
-            .withFaceLandmarks()
-            .withFaceDescriptor();
+          for (let attempt = 1; attempt <= 3; attempt++) {
+            setEnrollMsg(`Capturing sample ${attempt} of 3 — hold steady...`);
+            const detection = await window.faceapi
+              .detectSingleFace(enrollVideoRef.current, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.6 }))
+              .withFaceLandmarks()
+              .withFaceDescriptor();
 
-          if (!detection) {
-            setCapturingFace(false);
-            setEnrollMsg('No face detected! Ensure good lighting and look straight at the camera.');
-            return;
+            if (!detection) {
+              setCapturingFace(false);
+              setEnrollMsg('Face lost during scan! Ensure bright front lighting and try again.');
+              return;
+            }
+            samples.push(Array.from(detection.descriptor));
+            if (attempt < 3) {
+              await new Promise(r => setTimeout(r, 350));
+            }
           }
 
-          const descriptorArray = Array.from(detection.descriptor);
+          const averagedDescriptor = averageDescriptors(samples);
           setEmployees(prev =>
-            prev.map(emp => (emp.id === enrollingEmp.id ? { ...emp, faceDescriptor: descriptorArray } : emp))
+            prev.map(emp => (emp.id === enrollingEmp.id ? { ...emp, faceDescriptor: averagedDescriptor } : emp))
           );
 
           playBeepAndSpeak(true, `Face registered for ${enrollingEmp.name}`);
           setCapturingFace(false);
           setEnrollingEmp(null);
-          setScanStatus({ type: 'success', message: `✓ Face biometric registered for ${enrollingEmp.name} (${enrollingEmp.id})!` });
+          setScanStatus({ type: 'success', message: `✓ 3-angle face biometric registered for ${enrollingEmp.name} (${enrollingEmp.id})!` });
         } catch (err) {
           setCapturingFace(false);
           setEnrollMsg('Error reading face. Please try again.');
@@ -611,6 +663,10 @@
           synced: false
         };
 
+        // Immediately update ref & UI state BEFORE network await to eliminate 0.123s race conditions
+        attendanceLogsRef.current = [newLog, ...attendanceLogsRef.current];
+        setAttendanceLogs(prev => [newLog, ...prev]);
+
         const modeLabels = {
           CHECK_IN: 'Checked In',
           LUNCH_OUT: 'Lunch Out',
@@ -630,9 +686,11 @@
         playBeepAndSpeak(true, spokenMessages[activeMode]);
 
         const uploaded = await sendLogToGoogleSheet(newLog);
-        newLog.synced = uploaded;
-
-        setAttendanceLogs(prev => [newLog, ...prev]);
+        if (uploaded) {
+          setAttendanceLogs(prev =>
+            prev.map(l => (l.id === newLog.id ? { ...l, synced: true } : l))
+          );
+        }
 
         const syncNote = uploaded
           ? '✓ Saved to Sheet'
@@ -659,6 +717,13 @@
           return;
         }
 
+        // 5-second debounce lock blocks double-taps & simultaneous Manual + Camera scans
+        const now = Date.now();
+        if (actionLockMapRef.current[employee.id] && (now - actionLockMapRef.current[employee.id]) < DEBOUNCE_MS) {
+          return;
+        }
+        actionLockMapRef.current[employee.id] = now;
+
         const check = validateDuplicateAction(employee, activeMode);
         if (!check.allowed) {
           playBeepAndSpeak(false, check.spoken);
@@ -684,7 +749,7 @@
 
           if (videoEl) {
             const detection = await window.faceapi
-              .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.45 }))
+              .detectSingleFace(videoEl, new window.faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.6 }))
               .withFaceLandmarks()
               .withFaceDescriptor();
 
@@ -723,7 +788,7 @@
           role: newEmpRole || 'Staff Member',
           faceDescriptor: null,
           customShift: newEmpCustomShift
-            ? { checkInTime: newEmpIn, checkOutTime: newEmpOut, maxLunchMinutes: Number(newEmpLunch) || 45 }
+            ? { checkInTime: newEmpIn, checkOutTime: newEmpOut, maxLunchMinutes: Number(newEmpLunch) || 30 }
             : null
         }]);
         setNewEmpName('');
@@ -763,7 +828,7 @@
                     ? {
                         checkInTime: empShiftForm.checkInTime,
                         checkOutTime: empShiftForm.checkOutTime,
-                        maxLunchMinutes: Number(empShiftForm.maxLunchMinutes) || 45
+                        maxLunchMinutes: Number(empShiftForm.maxLunchMinutes) || 30
                       }
                     : null
                 }
@@ -812,7 +877,7 @@
       };
 
       const policyHint = {
-        FACE_ONLY: 'Look directly at the front camera — auto-logs with your name & voice chime',
+        FACE_ONLY: 'Look directly at the front camera — 2-frame strict verification active',
         QR_ONLY: 'Hold QR badge up to camera for instant badge check-in',
         BOTH: 'Hold QR badge below chin so both face & QR are visible'
       };
@@ -831,7 +896,7 @@
               <div>
                 <h1 style={s.title}>Altics Biometric Kiosk</h1>
                 <p style={s.subtitle}>
-                  Default Shift: {shiftRules.checkInTime} – {shiftRules.checkOutTime} • Custom Per-Staff Shifts Supported
+                  2-Frame Strict Face AI (0.42) • 5s Debounce • Shift: {shiftRules.checkInTime} – {shiftRules.checkOutTime}
                 </p>
               </div>
             </div>
@@ -967,7 +1032,7 @@
                 <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges, Face & Shift Timings</h2>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Assign individual shift timings or keep the office default ({shiftRules.checkInTime} – {shiftRules.checkOutTime}).</p>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Ensure each employee has only ONE profile here. Duplicate profiles cause face-recognition mix-ups.</p>
                   </div>
                   <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
                 </div>
@@ -988,7 +1053,7 @@
                           <div style={{ fontSize: '11px', color: emp.customShift ? '#a5b4fc' : '#64748b', fontWeight: 600 }}>
                             {emp.customShift
                               ? `⏰ Custom Shift: ${emp.customShift.checkInTime} – ${emp.customShift.checkOutTime} (Lunch ${emp.customShift.maxLunchMinutes}m)`
-                              : `⏰ Default Shift: ${shiftRules.checkInTime} – ${shiftRules.checkOutTime}`}
+                              : `⏰ Default Shift: ${shiftRules.checkInTime} – ${shiftRules.checkOutTime} (Lunch ${shiftRules.maxLunchMinutes}m)`}
                           </div>
                         </div>
                         <div style={{ backgroundColor: '#ffffff', padding: '6px', borderRadius: '8px', flexShrink: 0 }}>
@@ -1158,7 +1223,7 @@
                     </>
                   ) : (
                     <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '16px' }}>
-                      Currently following default office shift ({shiftRules.checkInTime} – {shiftRules.checkOutTime}).
+                      Currently following default office shift ({shiftRules.checkInTime} – {shiftRules.checkOutTime}, {shiftRules.maxLunchMinutes}m lunch).
                     </p>
                   )}
 
@@ -1182,7 +1247,7 @@
                 <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
                   <button type="button" style={s.testBtn} onClick={() => setEnrollingEmp(null)}>Cancel</button>
                   <button type="button" style={s.primaryBtn} disabled={capturingFace} onClick={captureAndSaveFace}>
-                    {capturingFace ? 'Scanning...' : '📸 Capture & Save Face'}
+                    {capturingFace ? 'Capturing 3 Samples...' : '📸 Capture 3-Sample Face'}
                   </button>
                 </div>
               </div>
