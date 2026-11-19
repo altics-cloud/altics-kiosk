@@ -39,12 +39,18 @@
     const { useState, useEffect, useMemo, useRef } = React;
 
     const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
-    const ADMIN_PIN = "1243"; // Change this to your private Admin PIN
+    const ADMIN_PIN = "1234"; // Change this to your private Admin PIN
 
     const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
     const FACE_MATCH_THRESHOLD = 0.42;
     const FACE_MARGIN_MIN = 0.07;
     const DEBOUNCE_MS = 5000;
+
+    // Smart Auto Mode Thresholds
+    const AUTO_LUNCH_HOUR = 13;          // 13:00 (1:00 PM) irrespective of shift
+    const AUTO_CHECKOUT_HOURS = 7;       // Auto Check-Out after 7 hours of shift
+    const MIN_MINS_BEFORE_LUNCH = 30;    // Prevents accidental Lunch Out right after Check-In
+    const MIN_MINS_BEFORE_LUNCH_IN = 2;  // Prevents accidental Post Lunch In while walking away
 
     function getTodayKey() {
       const d = new Date();
@@ -94,7 +100,7 @@
       const [pinInput, setPinInput] = useState('');
       const [pinError, setPinError] = useState('');
 
-      const [scanMode, setScanMode] = useState('CHECK_IN');
+      const [scanMode, setScanMode] = useState('AUTO');
       const [authPolicy, setAuthPolicy] = useState('FACE_ONLY');
       const [voiceEnabled, setVoiceEnabled] = useState(true);
       const [scanStatus, setScanStatus] = useState(null);
@@ -187,7 +193,6 @@
 
       const handleTabSwitch = (targetTab) => {
         if (targetTab === 'kiosk') {
-          // Auto-lock Admin Mode whenever returning to the public Kiosk Terminal
           setIsAdminUnlocked(false);
           setActiveTab('kiosk');
           return;
@@ -419,8 +424,96 @@
         return { tag: '', spokenExtra: '' };
       };
 
+      // Smart Auto Mode Resolver:
+      // 1. First entry -> CHECK_IN
+      // 2. Currently on LUNCH_OUT -> LUNCH_IN (Post Lunch)
+      // 3. After 7+ hours of shift OR reached individual shift Check-Out time -> CHECK_OUT
+      // 4. After 13:00 (1:00 PM) irrespective of shift (if lunch not yet taken) -> LUNCH_OUT
+      const resolveSmartAutoAction = (employee, nowDate) => {
+        const todayKey = getTodayKey();
+        const todayEmpLogs = attendanceLogsRef.current.filter(l => {
+          const logDate = l.date || todayKey;
+          return l.empId === employee.id && logDate === todayKey && l.type !== 'FIELD_DUTY';
+        });
+
+        const latest = todayEmpLogs[0];
+        const nowMs = nowDate.getTime();
+        const nowHours = nowDate.getHours();
+        const nowMins = nowHours * 60 + nowDate.getMinutes();
+        const rules = getEffectiveRulesForEmployee(employee);
+
+        // 1. First entry of the day -> CHECK_IN
+        if (!latest) {
+          return { allowed: true, resolvedMode: 'CHECK_IN' };
+        }
+
+        // Already checked out for the day
+        if (latest.type === 'CHECK_OUT') {
+          return {
+            allowed: false,
+            message: `${employee.name}, you have already checked out today (at ${latest.time}). Use manual Check-In for a second shift.`,
+            spoken: `You have already checked out today, ${employee.name}`
+          };
+        }
+
+        // 2. Returning from Lunch -> LUNCH_IN
+        if (latest.type === 'LUNCH_OUT') {
+          const minsSinceLunchOut = latest.rawTs ? (nowMs - latest.rawTs) / 60000 : MIN_MINS_BEFORE_LUNCH_IN;
+          if (minsSinceLunchOut < MIN_MINS_BEFORE_LUNCH_IN) {
+            return {
+              allowed: false,
+              message: `${employee.name}, Lunch Out was just logged at ${latest.time}. Scan again when returning.`,
+              spoken: `Lunch out already logged, ${employee.name}`
+            };
+          }
+          return { allowed: true, resolvedMode: 'LUNCH_IN' };
+        }
+
+        // Employee is currently CHECK_IN or LUNCH_IN
+        const firstCheckIn = [...todayEmpLogs].reverse().find(l => l.type === 'CHECK_IN');
+        const checkInTs = firstCheckIn && firstCheckIn.rawTs ? firstCheckIn.rawTs : (latest.rawTs || nowMs);
+        const hoursSinceCheckIn = (nowMs - checkInTs) / 3600000;
+        const minsSinceCheckIn = (nowMs - checkInTs) / 60000;
+        const shiftEndMins = timeToMinutes(rules.checkOutTime);
+
+        // 3. After 7 hours of shift OR reached individual shift Check-Out time -> CHECK_OUT
+        if (hoursSinceCheckIn >= AUTO_CHECKOUT_HOURS || (nowMins >= shiftEndMins && hoursSinceCheckIn >= 1)) {
+          return { allowed: true, resolvedMode: 'CHECK_OUT' };
+        }
+
+        // 4. After 13:00 (1:00 PM) irrespective of shift -> LUNCH_OUT (if not already taken)
+        const hasTakenLunch = todayEmpLogs.some(l => l.type === 'LUNCH_OUT');
+        if (!hasTakenLunch && nowHours >= AUTO_LUNCH_HOUR && minsSinceCheckIn >= MIN_MINS_BEFORE_LUNCH) {
+          return { allowed: true, resolvedMode: 'LUNCH_OUT' };
+        }
+
+        // Otherwise, employee is already checked in and not yet due for Lunch Out or Check-Out
+        if (!hasTakenLunch && nowHours < AUTO_LUNCH_HOUR) {
+          return {
+            allowed: false,
+            message: `You are already checked in, ${employee.name} (since ${firstCheckIn ? firstCheckIn.time : latest.time}). Auto Lunch Out starts at 1:00 PM.`,
+            spoken: `You are already checked in, ${employee.name}`
+          };
+        }
+
+        if (!hasTakenLunch && minsSinceCheckIn < MIN_MINS_BEFORE_LUNCH) {
+          return {
+            allowed: false,
+            message: `You just checked in, ${employee.name} (at ${firstCheckIn ? firstCheckIn.time : latest.time}).`,
+            spoken: `You are already checked in, ${employee.name}`
+          };
+        }
+
+        return {
+          allowed: false,
+          message: `You are already checked in, ${employee.name}. Auto Check-Out unlocks after ${AUTO_CHECKOUT_HOURS}h or at ${rules.checkOutTime} (tap Check-Out manually for half-day).`,
+          spoken: `You are already checked in, ${employee.name}`
+        };
+      };
+
       const validateDuplicateAction = (employee, activeMode) => {
-        if (activeMode === 'FIELD_DUTY') return { allowed: true };
+        if (activeMode === 'FIELD_DUTY') return { allowed: true, resolvedMode: 'FIELD_DUTY' };
+        if (activeMode === 'AUTO') return resolveSmartAutoAction(employee, new Date());
 
         const todayKey = getTodayKey();
         const todayEmpLogs = attendanceLogsRef.current.filter(l => {
@@ -477,7 +570,7 @@
           }
         }
 
-        return { allowed: true };
+        return { allowed: true, resolvedMode: activeMode };
       };
 
       const findStrictFaceMatch = (liveDesc, enrolledList) => {
@@ -595,8 +688,9 @@
                   return;
                 }
 
-                setLiveAiHint(`✓ Verified ${bestMatch.name} (${result.confidence}%)! Logging...`);
-                await recordVerifiedLog(bestMatch, scanModeRef.current, `Face Only (${result.confidence}%)`);
+                const finalAction = check.resolvedMode || scanModeRef.current;
+                setLiveAiHint(`✓ Verified ${bestMatch.name} (${result.confidence}%) → ${finalAction.replace('_', ' ')}`);
+                await recordVerifiedLog(bestMatch, finalAction, `Face Only (${result.confidence}%)`);
               } else if (result.reason === 'ambiguous') {
                 consecutiveMatchRef.current = { empId: null, count: 0 };
                 setLiveAiHint('⚠ Similar match detected — step closer & look straight at lens');
@@ -782,14 +876,16 @@
           return;
         }
 
+        const finalAction = check.resolvedMode || activeMode;
+
         if (!fromLiveCamera) {
-          const note = activeMode === 'FIELD_DUTY' ? 'Field Visit / Off-Site' : 'Manual Tap';
-          await recordVerifiedLog(employee, activeMode, note);
+          const note = finalAction === 'FIELD_DUTY' ? 'Field Visit / Off-Site' : (activeMode === 'AUTO' ? 'Smart Auto Tap' : 'Manual Tap');
+          await recordVerifiedLog(employee, finalAction, note);
           return;
         }
 
         if (policy === 'QR_ONLY') {
-          await recordVerifiedLog(employee, activeMode, 'QR Only Verified');
+          await recordVerifiedLog(employee, finalAction, 'QR Only Verified');
           return;
         }
 
@@ -821,7 +917,7 @@
           biometricNote = 'QR Only (Face Not Enrolled)';
         }
 
-        await recordVerifiedLog(employee, activeMode, biometricNote);
+        await recordVerifiedLog(employee, finalAction, biometricNote);
       };
 
       const handleAddEmployee = (e) => {
@@ -972,7 +1068,9 @@
       };
 
       const policyHint = {
-        FACE_ONLY: 'Look directly at the front camera — 2-frame strict verification active',
+        FACE_ONLY: scanMode === 'AUTO'
+          ? 'Smart Auto: 1st Scan = In • After 1PM = Lunch Out • Rescan = Post Lunch • After 7h = Check-Out'
+          : 'Look directly at the front camera — 2-frame strict verification active',
         QR_ONLY: 'Hold QR badge up to camera for instant badge check-in',
         BOTH: 'Hold QR badge below chin so both face & QR are visible'
       };
@@ -991,7 +1089,7 @@
               <div>
                 <h1 style={s.title}>Altics Biometric Kiosk</h1>
                 <p style={s.subtitle}>
-                  2-Frame Strict Face AI (0.42) • Admin PIN Protected • Shift: {shiftRules.checkInTime} – {shiftRules.checkOutTime}
+                  Smart Auto Mode • 2-Frame Face AI (0.42) • Shift: {shiftRules.checkInTime} – {shiftRules.checkOutTime}
                 </p>
               </div>
             </div>
@@ -1038,6 +1136,12 @@
                   <div style={s.card}>
                     <div style={{ fontSize: '12px', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>1. Select Attendance Action</div>
                     <div style={s.modeGrid}>
+                      <button
+                        style={{ ...s.modeBtn(scanMode === 'AUTO', '#38bdf8'), gridColumn: 'span 2', textAlign: 'center' }}
+                        onClick={() => { unlockSpeechEngine(); setScanMode('AUTO'); }}
+                      >
+                        ⚡ Smart Auto (In → 1PM Lunch → Return → 7h Out)
+                      </button>
                       <button style={s.modeBtn(scanMode === 'CHECK_IN', '#10b981')} onClick={() => { unlockSpeechEngine(); setScanMode('CHECK_IN'); }}>✓ Check-In</button>
                       <button style={s.modeBtn(scanMode === 'CHECK_OUT', '#f43f5e')} onClick={() => { unlockSpeechEngine(); setScanMode('CHECK_OUT'); }}>↪ Check-Out</button>
                       <button style={s.modeBtn(scanMode === 'LUNCH_OUT', '#f59e0b')} onClick={() => { unlockSpeechEngine(); setScanMode('LUNCH_OUT'); }}>☕ Lunch Out</button>
@@ -1056,7 +1160,7 @@
                   <div style={s.card}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span style={{ fontSize: '12px', color: '#34d399', fontWeight: 600 }}>
-                        ● Mode: {authPolicy === 'FACE_ONLY' ? 'Hands-Free Face' : authPolicy === 'QR_ONLY' ? 'QR Badge Only' : 'QR + Face'}
+                        ● {scanMode === 'AUTO' ? 'Smart Auto Active' : `Manual: ${scanMode.replace('_', ' ')}`} ({authPolicy === 'FACE_ONLY' ? 'Face' : authPolicy === 'QR_ONLY' ? 'QR' : 'QR+Face'})
                       </span>
                       <button
                         style={{ ...s.primaryBtn, backgroundColor: cameraActive ? '#f43f5e' : '#10b981', padding: '6px 12px', fontSize: '12px' }}
