@@ -39,6 +39,7 @@
     const { useState, useEffect, useMemo, useRef } = React;
 
     const GOOGLE_SHEET_URL = "https://script.google.com/macros/s/AKfycbwi6Tog6w0YR0lkeFk1GIITrsVFsItVz8t-Spr6vSyG0nMVzznx6UqAEs_pX7KxFoYk/exec";
+    const ADMIN_PIN = "1243"; // Change this to your private Admin PIN
 
     const FACE_MODEL_URL = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.13/model";
     const FACE_MATCH_THRESHOLD = 0.42;
@@ -88,6 +89,11 @@
 
     function AlticsKiosk() {
       const [activeTab, setActiveTab] = useState('kiosk');
+      const [isAdminUnlocked, setIsAdminUnlocked] = useState(false);
+      const [pendingAdminTab, setPendingAdminTab] = useState(null);
+      const [pinInput, setPinInput] = useState('');
+      const [pinError, setPinError] = useState('');
+
       const [scanMode, setScanMode] = useState('CHECK_IN');
       const [authPolicy, setAuthPolicy] = useState('FACE_ONLY');
       const [voiceEnabled, setVoiceEnabled] = useState(true);
@@ -126,6 +132,9 @@
 
       const [editingShiftEmp, setEditingShiftEmp] = useState(null);
       const [empShiftForm, setEmpShiftForm] = useState({ useCustom: false, checkInTime: '10:00', checkOutTime: '18:15', maxLunchMinutes: 30 });
+
+      const [editingEmp, setEditingEmp] = useState(null);
+      const [editEmpForm, setEditEmpForm] = useState({ id: '', name: '', department: 'Development', role: '' });
 
       const scannerRef = useRef(null);
       const faceLoopRef = useRef(null);
@@ -175,6 +184,43 @@
       const [selectedBadge, setSelectedBadge] = useState(null);
 
       const isSheetConfigured = GOOGLE_SHEET_URL && GOOGLE_SHEET_URL.startsWith('https://script.google.com/');
+
+      const handleTabSwitch = (targetTab) => {
+        if (targetTab === 'kiosk') {
+          // Auto-lock Admin Mode whenever returning to the public Kiosk Terminal
+          setIsAdminUnlocked(false);
+          setActiveTab('kiosk');
+          return;
+        }
+        if (isAdminUnlocked) {
+          setActiveTab(targetTab);
+        } else {
+          setPendingAdminTab(targetTab);
+          setPinInput('');
+          setPinError('');
+        }
+      };
+
+      const handlePinSubmit = (e) => {
+        e.preventDefault();
+        if (pinInput.trim() === String(ADMIN_PIN)) {
+          setIsAdminUnlocked(true);
+          if (pendingAdminTab) {
+            setActiveTab(pendingAdminTab);
+          }
+          setPendingAdminTab(null);
+          setPinInput('');
+          setPinError('');
+        } else {
+          setPinError('Incorrect PIN. Access denied.');
+          setPinInput('');
+        }
+      };
+
+      const lockAdminNow = () => {
+        setIsAdminUnlocked(false);
+        setActiveTab('kiosk');
+      };
 
       const getNextAutoEmpId = () => {
         const maxNum = employees.reduce((max, emp) => {
@@ -490,7 +536,7 @@
 
             const enrolledList = employeesRef.current.filter(e => Array.isArray(e.faceDescriptor));
             if (enrolledList.length === 0) {
-              setLiveAiHint('⚠ No faces registered yet — go to Badges & Faces tab first');
+              setLiveAiHint('⚠ No faces registered yet — unlock Badges & Faces tab first');
               return;
             }
 
@@ -556,7 +602,7 @@
                 setLiveAiHint('⚠ Similar match detected — step closer & look straight at lens');
               } else {
                 consecutiveMatchRef.current = { empId: null, count: 0 };
-                setLiveAiHint('Face not recognized — step closer or re-register face in Badges tab');
+                setLiveAiHint('Face not recognized — step closer or ask Admin to re-register face');
               }
             } catch (e) {}
             isProcessingFaceRef.current = false;
@@ -807,6 +853,45 @@
         setShowAddModal(false);
       };
 
+      const openEditEmpModal = (emp) => {
+        setEditingEmp(emp);
+        setEditEmpForm({
+          id: emp.id,
+          name: emp.name,
+          department: emp.department || 'Development',
+          role: emp.role || ''
+        });
+      };
+
+      const saveEditedEmp = (e) => {
+        e.preventDefault();
+        if (!editingEmp || !editEmpForm.name.trim() || !editEmpForm.id.trim()) return;
+
+        const finalId = editEmpForm.id.trim().toUpperCase();
+        const duplicate = employees.find(
+          emp => emp.id.toLowerCase() === finalId.toLowerCase() && emp.id !== editingEmp.id
+        );
+        if (duplicate) {
+          window.alert(`Employee ID "${finalId}" already belongs to ${duplicate.name}. Please enter a unique ID.`);
+          return;
+        }
+
+        setEmployees(prev =>
+          prev.map(emp =>
+            emp.id === editingEmp.id
+              ? {
+                  ...emp,
+                  id: finalId,
+                  name: editEmpForm.name.trim(),
+                  department: editEmpForm.department,
+                  role: editEmpForm.role.trim() || 'Staff Member'
+                }
+              : emp
+          )
+        );
+        setEditingEmp(null);
+      };
+
       const openEmpShiftEditor = (emp) => {
         setEditingShiftEmp(emp);
         if (emp.customShift) {
@@ -906,12 +991,17 @@
               <div>
                 <h1 style={s.title}>Altics Biometric Kiosk</h1>
                 <p style={s.subtitle}>
-                  2-Frame Strict Face AI (0.42) • 5s Debounce • Shift: {shiftRules.checkInTime} – {shiftRules.checkOutTime}
+                  2-Frame Strict Face AI (0.42) • Admin PIN Protected • Shift: {shiftRules.checkInTime} – {shiftRules.checkOutTime}
                 </p>
               </div>
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              {isAdminUnlocked && (
+                <button style={s.dangerBtn} onClick={lockAdminNow}>
+                  🔓 Lock Admin
+                </button>
+              )}
               <button
                 style={{ ...s.testBtn, backgroundColor: voiceEnabled ? 'rgba(99,102,241,0.2)' : '#1e293b', color: voiceEnabled ? '#a5b4fc' : '#94a3b8' }}
                 onClick={() => { unlockSpeechEngine(); setVoiceEnabled(!voiceEnabled); }}
@@ -931,9 +1021,13 @@
             </div>
 
             <nav style={s.nav}>
-              <button style={s.navBtn(activeTab === 'kiosk')} onClick={() => setActiveTab('kiosk')}>Kiosk Terminal</button>
-              <button style={s.navBtn(activeTab === 'employees')} onClick={() => setActiveTab('employees')}>Badges & Faces ({employees.length})</button>
-              <button style={s.navBtn(activeTab === 'reports')} onClick={() => setActiveTab('reports')}>Shift Rules & Logs</button>
+              <button style={s.navBtn(activeTab === 'kiosk')} onClick={() => handleTabSwitch('kiosk')}>Kiosk Terminal</button>
+              <button style={s.navBtn(activeTab === 'employees')} onClick={() => handleTabSwitch('employees')}>
+                {isAdminUnlocked ? '' : '🔒 '}Badges & Faces ({employees.length})
+              </button>
+              <button style={s.navBtn(activeTab === 'reports')} onClick={() => handleTabSwitch('reports')}>
+                {isAdminUnlocked ? '' : '🔒 '}Shift Rules & Logs
+              </button>
             </nav>
           </header>
 
@@ -1037,12 +1131,12 @@
               </div>
             )}
 
-            {activeTab === 'employees' && (
+            {activeTab === 'employees' && isAdminUnlocked && (
               <div>
                 <div style={{ ...s.card, display: 'flex', flexWrap: 'wrap', gap: '12px', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div>
                     <h2 style={{ margin: 0, fontSize: '18px' }}>Staff QR Badges, Face & Shift Timings</h2>
-                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Ensure each employee has only ONE profile here. Duplicate profiles cause face-recognition mix-ups.</p>
+                    <p style={{ margin: '4px 0 0 0', fontSize: '12px', color: '#94a3b8' }}>Admin Mode Active. Switching back to Kiosk Terminal will automatically re-lock this tab.</p>
                   </div>
                   <button style={s.primaryBtn} onClick={() => setShowAddModal(true)}>+ Enroll New Staff</button>
                 </div>
@@ -1077,6 +1171,9 @@
                         >
                           {emp.faceDescriptor ? '🔄 Re-Capture Face' : '📸 Register Face'}
                         </button>
+                        <button style={s.testBtn} onClick={() => openEditEmpModal(emp)}>
+                          ✏️ Edit
+                        </button>
                         <button style={s.testBtn} onClick={() => openEmpShiftEditor(emp)}>
                           ⏰ Shift
                         </button>
@@ -1089,7 +1186,7 @@
               </div>
             )}
 
-            {activeTab === 'reports' && (
+            {activeTab === 'reports' && isAdminUnlocked && (
               <div>
                 <div style={s.card}>
                   <h2 style={{ margin: '0 0 6px 0', fontSize: '18px' }}>Default Office Shift & Lunch Timings</h2>
@@ -1187,6 +1284,92 @@
               </div>
             )}
           </main>
+
+          {pendingAdminTab && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '340px', textAlign: 'center' }}>
+                <h3 style={{ marginTop: 0 }}>🔒 Admin PIN Required</h3>
+                <p style={{ fontSize: '12px', color: '#94a3b8', marginBottom: '14px' }}>
+                  Enter the Admin PIN to add, edit, or remove staff and shift rules.
+                </p>
+                <form onSubmit={handlePinSubmit}>
+                  <input
+                    style={{ ...s.input, textAlign: 'center', fontSize: '20px', letterSpacing: '6px' }}
+                    type="password"
+                    inputMode="numeric"
+                    autoFocus
+                    required
+                    value={pinInput}
+                    onChange={e => setPinInput(e.target.value)}
+                    placeholder="••••"
+                  />
+                  {pinError && (
+                    <div style={{ color: '#fda4af', fontSize: '12px', fontWeight: 600, marginBottom: '12px' }}>
+                      {pinError}
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: '10px', justifyContent: 'center' }}>
+                    <button
+                      type="button"
+                      style={s.testBtn}
+                      onClick={() => { setPendingAdminTab(null); setPinInput(''); setPinError(''); }}
+                    >
+                      Cancel
+                    </button>
+                    <button type="submit" style={s.primaryBtn}>Unlock</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
+
+          {editingEmp && (
+            <div style={s.modalOverlay}>
+              <div style={{ ...s.card, width: '100%', maxWidth: '400px' }}>
+                <h3 style={{ marginTop: 0 }}>Edit Staff Details</h3>
+                <form onSubmit={saveEditedEmp}>
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Employee ID</label>
+                  <input
+                    style={s.input}
+                    type="text"
+                    required
+                    value={editEmpForm.id}
+                    onChange={e => setEditEmpForm({ ...editEmpForm, id: e.target.value })}
+                  />
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Full Name</label>
+                  <input
+                    style={s.input}
+                    type="text"
+                    required
+                    value={editEmpForm.name}
+                    onChange={e => setEditEmpForm({ ...editEmpForm, name: e.target.value })}
+                  />
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Department</label>
+                  <select
+                    style={s.input}
+                    value={editEmpForm.department}
+                    onChange={e => setEditEmpForm({ ...editEmpForm, department: e.target.value })}
+                  >
+                    <option value="Development">Development</option>
+                    <option value="Design">Design</option>
+                    <option value="Marketing">Marketing</option>
+                    <option value="Operations">Operations</option>
+                  </select>
+                  <label style={{ fontSize: '12px', color: '#94a3b8' }}>Role</label>
+                  <input
+                    style={s.input}
+                    type="text"
+                    value={editEmpForm.role}
+                    onChange={e => setEditEmpForm({ ...editEmpForm, role: e.target.value })}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '10px' }}>
+                    <button type="button" style={s.testBtn} onClick={() => setEditingEmp(null)}>Cancel</button>
+                    <button type="submit" style={s.primaryBtn}>Save Changes</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
 
           {editingShiftEmp && (
             <div style={s.modalOverlay}>
