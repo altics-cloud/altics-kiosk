@@ -416,7 +416,7 @@
           );
           if (lastLunchOut) {
             const breakMins = Math.round((nowDate.getTime() - lastLunchOut.rawTs) / 60000);
-            const maxAllowedLunch = Number(rules.maxLunchMinutes ?? 30) + Number(rules.lunchGraceMinutes ?? 5);
+            const maxAllowedLunch = (rules.maxLunchMinutes !== undefined ? Number(rules.maxLunchMinutes) : 30) + (rules.lunchGraceMinutes !== undefined ? Number(rules.lunchGraceMinutes) : 5);
             if (breakMins > maxAllowedLunch) {
               return { tag: `Lunch ${breakMins}m (Over)`, spokenExtra: ', Extended lunch noted' };
             }
