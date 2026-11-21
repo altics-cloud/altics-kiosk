@@ -380,7 +380,7 @@
         const nowMins = nowDate.getHours() * 60 + nowDate.getMinutes();
 
         if (activeMode === 'CHECK_IN') {
-          const grace = Number(rules.graceMinutes ?? 10);
+          const grace = rules.graceMinutes !== undefined ? Number(rules.graceMinutes) : 10;
           const targetIn = timeToMinutes(rules.checkInTime) + grace;
           if (nowMins > targetIn) {
             const lateBy = nowMins - timeToMinutes(rules.checkInTime);
